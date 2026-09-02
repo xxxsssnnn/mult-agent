@@ -9,7 +9,6 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "0001"
@@ -21,7 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.create_table(
         "users",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
         sa.Column("username", sa.String(length=50), nullable=False),
         sa.Column("email", sa.String(length=100), nullable=False),
         sa.Column("password_hash", sa.String(length=255), nullable=False),
@@ -35,12 +34,12 @@ def upgrade() -> None:
 
     op.create_table(
         "agents",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
         sa.Column("name", sa.String(length=100), nullable=False),
         sa.Column("type", sa.String(length=50), nullable=False),
         sa.Column("description", sa.Text()),
         sa.Column("config", sa.JSON()),
-        sa.Column("capabilities", postgresql.ARRAY(sa.String())),
+        sa.Column("capabilities", sa.JSON()),
         sa.Column("status", sa.String(length=20), server_default="active"),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
@@ -48,9 +47,9 @@ def upgrade() -> None:
 
     op.create_table(
         "conversations",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
         sa.Column("session_id", sa.String(length=100), nullable=False),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id")),
+        sa.Column("user_id", sa.Uuid(as_uuid=True), sa.ForeignKey("users.id")),
         sa.Column("title", sa.String(length=200)),
         sa.Column("metadata", sa.JSON()),
         sa.Column("created_at", sa.DateTime(), nullable=False),
@@ -60,10 +59,10 @@ def upgrade() -> None:
 
     op.create_table(
         "tasks",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
         sa.Column("task_id", sa.String(length=100), nullable=False),
-        sa.Column("parent_task_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tasks.id")),
-        sa.Column("agent_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("agents.id")),
+        sa.Column("parent_task_id", sa.Uuid(as_uuid=True), sa.ForeignKey("tasks.id")),
+        sa.Column("agent_id", sa.Uuid(as_uuid=True), sa.ForeignKey("agents.id")),
         sa.Column("title", sa.String(length=200), nullable=False),
         sa.Column("description", sa.Text()),
         sa.Column("status", sa.String(length=20), server_default="pending"),
@@ -81,8 +80,8 @@ def upgrade() -> None:
 
     op.create_table(
         "messages",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("conversation_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("conversations.id")),
+        sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+        sa.Column("conversation_id", sa.Uuid(as_uuid=True), sa.ForeignKey("conversations.id")),
         sa.Column("role", sa.String(length=20), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
         sa.Column("tool_calls", sa.JSON()),
@@ -92,8 +91,8 @@ def upgrade() -> None:
 
     op.create_table(
         "memory_entries",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id")),
+        sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+        sa.Column("user_id", sa.Uuid(as_uuid=True), sa.ForeignKey("users.id")),
         sa.Column("session_id", sa.String(length=100)),
         sa.Column("namespace", sa.String(length=20), nullable=False, server_default="user"),
         sa.Column("memory_type", sa.String(length=20), nullable=False),

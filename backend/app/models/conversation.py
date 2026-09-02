@@ -1,7 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, JSON, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Text, DateTime, JSON, ForeignKey, Uuid
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -9,9 +8,9 @@ from app.core.database import Base
 class Conversation(Base):
     __tablename__ = "conversations"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     session_id = Column(String(100), unique=True, nullable=False, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    user_id = Column(Uuid(as_uuid=True), ForeignKey("users.id"))
     title = Column(String(200))
     metadata_ = Column("metadata", JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -24,8 +23,8 @@ class Conversation(Base):
 class Message(Base):
     __tablename__ = "messages"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"))
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(Uuid(as_uuid=True), ForeignKey("conversations.id"))
     role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
     tool_calls = Column(JSON)

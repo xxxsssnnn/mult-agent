@@ -1,7 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Integer, DateTime, JSON, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Text, Integer, DateTime, JSON, ForeignKey, Uuid
 from sqlalchemy.orm import relationship, backref
 from app.core.database import Base
 
@@ -9,10 +8,10 @@ from app.core.database import Base
 class Task(Base):
     __tablename__ = "tasks"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(String(100), unique=True, nullable=False, index=True)
-    parent_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"))
-    agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id"))
+    parent_task_id = Column(Uuid(as_uuid=True), ForeignKey("tasks.id"))
+    agent_id = Column(Uuid(as_uuid=True), ForeignKey("agents.id"))
     title = Column(String(200), nullable=False)
     description = Column(Text)
     status = Column(String(20), default="pending")

@@ -10,9 +10,8 @@ memory_type 枚举约定:
 import uuid
 from datetime import datetime
 from sqlalchemy import (
-    Column, String, Text, DateTime, Float, Integer, JSON, ForeignKey, Index,
+    Column, String, Text, DateTime, Float, Integer, JSON, ForeignKey, Index, Uuid,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -20,9 +19,9 @@ from app.core.database import Base
 class MemoryEntry(Base):
     __tablename__ = "memory_entries"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # 可空: 兼容匿名/系统级记忆
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     # 来源会话, 可空表示跨会话记忆
     session_id = Column(String(100), nullable=True, index=True)
     # 命名空间: user / team / session

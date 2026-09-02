@@ -14,6 +14,7 @@ from sqlalchemy import select
 import structlog
 
 from app.models.conversation import Conversation, Message
+from app.models.memory_entry import MemoryEntry
 from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -419,6 +420,18 @@ class MemoryPersistence:
                 Message.__table__.delete().where(
                     Message.conversation_id == conversation.id
                 )
+            )
+
+            # 归档该会话产生的记忆条目（软删除，保留审计）。
+            # 若只删会话不归档条目，已删除会话的记忆仍会参与跨会话检索
+            # （GET /entries 与语义检索均按 user_id 过滤），形成孤儿数据。
+            await self.db.execute(
+                MemoryEntry.__table__.update()
+                .where(
+                    MemoryEntry.session_id == session_id,
+                    MemoryEntry.archived_at.is_(None),
+                )
+                .values(archived_at=datetime.utcnow(), updated_at=datetime.utcnow())
             )
 
             # 删除会话

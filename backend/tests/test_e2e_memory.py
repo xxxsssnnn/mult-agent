@@ -117,6 +117,20 @@ async def run():
                 f"summary_len={len(summary)} summary={summary[:120]}",
             )
 
+            # 6. 删除会话后其记忆不再被检索（孤儿数据防护）
+            r = await client.delete(f"/api/v1/memory/{sid1}", headers=headers)
+            check("删除会话1", r.status_code == 200, f"status={r.status_code}")
+            r = await client.get(
+                "/api/v1/memory/entries", params={"query": "旺财"}, headers=headers
+            )
+            data = r.json()
+            entries = data.get("entries") or []
+            check(
+                "删除会话后该会话记忆不再被检索",
+                len(entries) == 0,
+                f"count={len(entries)} first={entries[0] if entries else None}",
+            )
+
 
 if __name__ == "__main__":
     asyncio.run(run())

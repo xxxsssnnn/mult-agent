@@ -371,6 +371,7 @@ async def list_memory_entries(
     query: Optional[str] = None,
     memory_type: Optional[str] = None,
     limit: int = 20,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -378,16 +379,20 @@ async def list_memory_entries(
 
     - 带 query: 关键词混合检索（相关度 + 强度 + 新鲜度）
     - 不带 query: 按记忆质量列出
+    - limit/offset: 分页
     """
     try:
         manager = _entry_manager("__global__", current_user.id, db)
         if query:
             entries = await manager.search_memories(
-                query=query, limit=limit, memory_type=memory_type
+                query=query,
+                limit=limit,
+                memory_type=memory_type,
+                offset=offset,
             )
         else:
             entries = await manager.get_memories(
-                memory_type=memory_type, limit=limit
+                memory_type=memory_type, limit=limit, offset=offset
             )
         return {"success": True, "count": len(entries), "entries": entries}
     except Exception as e:
@@ -471,4 +476,22 @@ async def clear_memory_entries(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to clear memory entries: {str(e)}",
+        )
+
+
+@router.get("/stats")
+async def get_user_memory_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """用户级记忆条目统计（跨会话）：总量/归档数/按类型分布"""
+    try:
+        manager = _entry_manager("__stats__", current_user.id, db)
+        stats = await manager.get_memory_stats()
+        return {"success": True, "stats": stats}
+    except Exception as e:
+        logger.error("Failed to get memory stats", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get memory stats: {str(e)}",
         )

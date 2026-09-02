@@ -67,6 +67,7 @@ class MemoryRetriever:
         session_id: Optional[str] = None,
         memory_type: Optional[str] = None,
         limit: Optional[int] = None,
+        offset: int = 0,
     ) -> List[Dict]:
         """检索记忆条目
 
@@ -77,6 +78,7 @@ class MemoryRetriever:
             session_id: 限定来源会话（None 表示跨会话检索）
             memory_type: 限定记忆类型（fact/preference/procedural/...）
             limit: 返回条数上限（默认 top_k）
+            offset: 分页偏移
 
         Returns:
             记忆字典列表，含 score 排序字段
@@ -119,7 +121,8 @@ class MemoryRetriever:
             scored.append((score, m))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        picked = scored[: (limit or self.top_k)]
+        page_size = limit or self.top_k
+        picked = scored[offset : offset + page_size]
 
         # 更新命中统计（失败不影响主流程）
         hit_ids = [m.id for _, m in picked]

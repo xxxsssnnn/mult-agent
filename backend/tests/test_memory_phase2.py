@@ -215,6 +215,15 @@ def test_retriever_respects_limit():
     check("limit 生效", len(results) == 3)
 
 
+def test_retriever_pagination_offset():
+    rows = [make_entry(f"记忆 {i}", strength=0.1 + i / 10) for i in range(5)]
+    session = FakeSession(rows=rows)
+    first = run(MemoryRetriever(top_k=10).retrieve(session, None, query=None, limit=2, offset=0))
+    second = run(MemoryRetriever(top_k=10).retrieve(session, None, query=None, limit=2, offset=2))
+    check("第一页 2 条", len(first) == 2)
+    check("第二页 2 条且不与第一页重叠", len(second) == 2 and second[0]["id"] != first[0]["id"])
+
+
 # ---------- 衰减与遗忘 ----------
 
 def test_decay_fresh_memory_barely_decays():
@@ -268,6 +277,7 @@ def main():
         test_retriever_ranks_by_query,
         test_retriever_ranks_by_strength_without_query,
         test_retriever_respects_limit,
+        test_retriever_pagination_offset,
         test_decay_fresh_memory_barely_decays,
         test_decay_old_memory_decays,
         test_decay_frequently_accessed_decays_slower,

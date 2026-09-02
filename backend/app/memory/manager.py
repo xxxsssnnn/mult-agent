@@ -317,8 +317,9 @@ class MemoryManager:
         query: str,
         limit: int = 5,
         memory_type: Optional[str] = None,
+        offset: int = 0,
     ) -> List[Dict]:
-        """跨会话检索相关记忆条目（混合打分）"""
+        """跨会话检索相关记忆条目（混合打分，支持分页）"""
         self._require_db()
         from app.memory.retriever import MemoryRetriever
         retriever = MemoryRetriever(top_k=limit)
@@ -328,6 +329,7 @@ class MemoryManager:
             query=query,
             memory_type=memory_type,
             limit=limit,
+            offset=offset,
         )
 
     async def get_memories(
@@ -335,26 +337,25 @@ class MemoryManager:
         memory_type: Optional[str] = None,
         limit: int = 50,
         include_archived: bool = False,
+        offset: int = 0,
     ) -> List[Dict]:
-        """列出记忆条目（按质量排序）"""
+        """列出记忆条目（按质量排序，支持分页）"""
         self._require_db()
         from app.memory.retriever import MemoryRetriever
         retriever = MemoryRetriever(top_k=limit)
-        # 暂用 retriever 的 retrieve 无查询模式；include_archived 场景需独立查询
+        # include_archived 场景需独立查询（retriever 仅返回有效记忆）
         if include_archived:
-            from sqlalchemy import select, or_
+            from app.memory.common import normalize_user_id
+            from sqlalchemy import select
             from app.models.memory_entry import MemoryEntry
-            stmt = select(MemoryEntry).where(
-                or_(
-                    MemoryEntry.archived_at.is_(None),
-                    MemoryEntry.archived_at.is_not(None),
-                )
-            )
+            stmt = select(MemoryEntry)
             if memory_type:
                 stmt = stmt.where(MemoryEntry.memory_type == memory_type)
             if self.user_id is not None:
-                stmt = stmt.where(MemoryEntry.user_id == self.user_id)
-            stmt = stmt.order_by(MemoryEntry.updated_at.desc()).limit(limit)
+                stmt = stmt.where(
+                    MemoryEntry.user_id == normalize_user_id(self.user_id)
+                )
+            stmt = stmt.order_by(MemoryEntry.updated_at.desc()).limit(limit).offset(offset)
             result = await self.db_session.execute(stmt)
             entries = result.scalars().all()
             return [MemoryRetriever._to_dict(m, 0.0) for m in entries]
@@ -363,7 +364,61 @@ class MemoryManager:
             self.user_id,
             memory_type=memory_type,
             limit=limit,
+            offset=offset,
         )
+
+    async def get_memory_stats(self) -> Dict:
+        """记忆条目统计（用户级、跨会话）：总量/归档/按类型分布"""
+        self._require_db()
+        from app.memory.common import normalize_user_id
+        from app.models.memory_entry import MemoryEntry
+        from sqlalchemy import func, select
+
+        uid = normalize_user_id(self.user_id)
+        base = (MemoryEntry.user_id == uid) if uid is not None else MemoryEntry.user_id.is_(None)
+
+        total = (
+            await self.db_session.execute(
+                select(func.count(MemoryEntry.id)).where(
+                    base, MemoryEntry.archived_at.is_(None)
+                )
+            )
+        ).scalar() or 0
+        archived = (
+            await self.db_session.execute(
+                select(func.count(MemoryEntry.id)).where(
+                    base, MemoryEntry.archived_at.is_not(None)
+                )
+            )
+        ).scalar() or 0
+
+        rows = (
+            await self.db_session.execute(
+                select(
+                    MemoryEntry.memory_type,
+                    func.count(MemoryEntry.id),
+                    func.avg(MemoryEntry.strength),
+                    func.sum(MemoryEntry.access_count),
+                )
+                .where(base, MemoryEntry.archived_at.is_(None))
+                .group_by(MemoryEntry.memory_type)
+            )
+        ).all()
+        by_type = {
+            r[0]: {
+                "count": r[1],
+                "avg_strength": round(float(r[2] or 0.0), 3),
+                "total_access_count": int(r[3] or 0),
+            }
+            for r in rows
+        }
+        logger.info(
+            "memory.stats.computed",
+            user_id=str(self.user_id),
+            total=total,
+            archived=archived,
+        )
+        return {"total": total, "archived": archived, "by_type": by_type}
 
     async def add_memory(
         self,

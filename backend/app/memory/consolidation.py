@@ -18,25 +18,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
+from app.memory.common import normalize_user_id
 from app.memory.long_term import LongTermMemory
 from app.models.conversation import Conversation
 from app.models.memory_entry import MemoryEntry
 
 logger = structlog.get_logger(__name__)
-
-
-def _normalize_user_id(user_id):
-    """把 Celery 传递的 str user_id 转回 UUID，无法解析则置 None"""
-    if user_id is None:
-        return None
-    from uuid import UUID
-    if isinstance(user_id, UUID):
-        return user_id
-    try:
-        return UUID(str(user_id))
-    except (ValueError, TypeError, AttributeError):
-        logger.warning("memory.consolidation.invalid_user_id", user_id=str(user_id))
-        return None
 
 
 def _make_session():
@@ -83,6 +70,27 @@ async def save_event_entries(session, session_id: str, user_id, messages: list) 
     return entries
 
 
+async def _extract_and_apply(session, user_id, session_id, messages: list) -> list:
+    """提取结构化记忆条目并应用更新策略（去重/强化/冲突处理）。
+
+    提取失败不阻断 consolidation 主流程（降级为仅事件记忆）。
+    """
+    try:
+        from app.memory.extractor import MemoryExtractor
+        from app.memory.updater import apply_memory_updates
+
+        extractor = MemoryExtractor()
+        extracted = await extractor.extract(messages)
+        applied = await apply_memory_updates(session, user_id, session_id, extracted)
+        return applied
+    except Exception:
+        logger.exception(
+            "memory.consolidation.extract_failed",
+            session_id=session_id,
+        )
+        return []
+
+
 async def consolidate_memory(
     session_id: str,
     user_id=None,
@@ -102,7 +110,7 @@ async def consolidate_memory(
     if not messages:
         return {"session_id": session_id, "status": "noop"}
 
-    user_id = _normalize_user_id(user_id)
+    user_id = normalize_user_id(user_id)
     engine, session = _make_session()
     try:
         # 1. 加载现有会话与摘要
@@ -125,8 +133,11 @@ async def consolidate_memory(
         meta["summary"] = new_summary
         conv.metadata_ = meta
 
-        # 4. 事件记忆条目入库
+        # 4. 事件记忆条目入库（溯源/审计）
         await save_event_entries(session, session_id, user_id, messages)
+
+        # 5. 提取结构化记忆（fact/preference/procedural）并按更新策略入库
+        extracted = await _extract_and_apply(session, user_id, session_id, messages)
 
         await session.commit()
         logger.info(
@@ -134,11 +145,13 @@ async def consolidate_memory(
             session_id=session_id,
             messages=len(messages),
             summary_len=len(new_summary),
+            extracted_memories=len(extracted),
         )
         return {
             "session_id": session_id,
             "status": "ok",
             "summary_len": len(new_summary),
+            "extracted_memories": len(extracted),
         }
     except Exception:
         await session.rollback()

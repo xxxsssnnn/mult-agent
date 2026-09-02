@@ -1,8 +1,9 @@
 """记忆管理API端点"""
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Literal
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_active_user
@@ -13,6 +14,14 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/memory", tags=["memory"])
+
+
+class MemoryEntryCreate(BaseModel):
+    """手动添加记忆条目请求体"""
+    content: str = Field(..., min_length=1, max_length=500, description="记忆内容")
+    memory_type: Literal["fact", "preference", "procedural", "event", "summary"] = "fact"
+    entity: Optional[str] = Field(None, max_length=200, description="主体实体（冲突检测用）")
+    confidence: float = Field(0.8, ge=0.0, le=1.0)
 
 
 @router.post("/session")
@@ -347,4 +356,101 @@ async def demo_memory_feature(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Demo failed: {str(e)}"
+        )
+
+
+# ---------- 跨会话记忆条目管理 ----------
+
+def _entry_manager(session_id: str, user_id, db) -> MemoryManager:
+    """构建面向记忆条目操作的 MemoryManager（无需加载历史，快速直查）"""
+    return MemoryManager(session_id=session_id, user_id=user_id, db_session=db)
+
+
+@router.get("/entries")
+async def list_memory_entries(
+    query: Optional[str] = None,
+    memory_type: Optional[str] = None,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """列出或检索当前用户的记忆条目（跨会话，按质量排序）
+
+    - 带 query: 关键词混合检索（相关度 + 强度 + 新鲜度）
+    - 不带 query: 按记忆质量列出
+    """
+    try:
+        manager = _entry_manager("__global__", current_user.id, db)
+        if query:
+            entries = await manager.search_memories(
+                query=query, limit=limit, memory_type=memory_type
+            )
+        else:
+            entries = await manager.get_memories(
+                memory_type=memory_type, limit=limit
+            )
+        return {"success": True, "count": len(entries), "entries": entries}
+    except Exception as e:
+        logger.error("Failed to list memory entries", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list memory entries: {str(e)}",
+        )
+
+
+@router.post("/entries")
+async def create_memory_entry(
+    payload: MemoryEntryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """手动添加一条记忆条目"""
+    try:
+        manager = _entry_manager("__manual__", current_user.id, db)
+        entry = await manager.add_memory(
+            content=payload.content,
+            memory_type=payload.memory_type,
+            entity=payload.entity,
+            confidence=payload.confidence,
+        )
+        return {"success": True, "entry": entry}
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+    except Exception as e:
+        logger.error("Failed to create memory entry", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create memory entry: {str(e)}",
+        )
+
+
+@router.delete("/entries/{memory_id}")
+async def delete_memory_entry(
+    memory_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """软删除一条记忆条目（保留审计轨迹）"""
+    try:
+        manager = _entry_manager("__manual__", current_user.id, db)
+        deleted = await manager.delete_memory(memory_id)
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Memory entry not found",
+            )
+        return {"success": True, "deleted": True}
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete memory entry", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete memory entry: {str(e)}",
         )

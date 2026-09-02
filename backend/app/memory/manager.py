@@ -244,7 +244,29 @@ class MemoryManager:
         long_summary = await self.long_term.get_summary()
         if long_summary:
             parts.append(f"=== Conversation Summary ===\n{long_summary}\n")
-        
+
+        # 添加相关记忆条目（跨会话混合检索，需数据库会话）
+        if self.db_session and settings.MEMORY_RETRIEVAL_ENABLED:
+            try:
+                from app.memory.retriever import MemoryRetriever
+                retriever = MemoryRetriever(top_k=settings.MEMORY_RETRIEVAL_TOP_K)
+                memories = await retriever.retrieve(
+                    self.db_session,
+                    self.user_id,
+                    query=None,
+                )
+                if memories:
+                    mem_lines = [
+                        f"- [{m['memory_type']}] {m['content']}"
+                        for m in memories
+                    ]
+                    parts.append("=== Relevant Memories ===\n" + "\n".join(mem_lines))
+            except Exception:
+                logger.warning(
+                    "Failed to retrieve memories for context",
+                    session_id=self.session_id,
+                )
+
         # 添加短期记忆（最近的对话）
         short_context = await self.short_term.get_context_string()
         if short_context:
@@ -256,7 +278,8 @@ class MemoryManager:
             "Context retrieved",
             total_length=len(context),
             has_summary=bool(long_summary),
-            has_short_term=bool(short_context)
+            has_short_term=bool(short_context),
+            has_memories="=== Relevant Memories ===" in context,
         )
         
         return context
@@ -282,7 +305,136 @@ class MemoryManager:
             摘要字符串
         """
         return await self.long_term.get_summary()
-    
+
+    # ---------- 记忆条目管理（跨会话，需 db_session） ----------
+
+    def _require_db(self) -> None:
+        if not self.db_session:
+            raise RuntimeError("Memory entry operations require a db_session")
+
+    async def search_memories(
+        self,
+        query: str,
+        limit: int = 5,
+        memory_type: Optional[str] = None,
+    ) -> List[Dict]:
+        """跨会话检索相关记忆条目（混合打分）"""
+        self._require_db()
+        from app.memory.retriever import MemoryRetriever
+        retriever = MemoryRetriever(top_k=limit)
+        return await retriever.retrieve(
+            self.db_session,
+            self.user_id,
+            query=query,
+            memory_type=memory_type,
+            limit=limit,
+        )
+
+    async def get_memories(
+        self,
+        memory_type: Optional[str] = None,
+        limit: int = 50,
+        include_archived: bool = False,
+    ) -> List[Dict]:
+        """列出记忆条目（按质量排序）"""
+        self._require_db()
+        from app.memory.retriever import MemoryRetriever
+        retriever = MemoryRetriever(top_k=limit)
+        # 暂用 retriever 的 retrieve 无查询模式；include_archived 场景需独立查询
+        if include_archived:
+            from sqlalchemy import select, or_
+            from app.models.memory_entry import MemoryEntry
+            stmt = select(MemoryEntry).where(
+                or_(
+                    MemoryEntry.archived_at.is_(None),
+                    MemoryEntry.archived_at.is_not(None),
+                )
+            )
+            if memory_type:
+                stmt = stmt.where(MemoryEntry.memory_type == memory_type)
+            if self.user_id is not None:
+                stmt = stmt.where(MemoryEntry.user_id == self.user_id)
+            stmt = stmt.order_by(MemoryEntry.updated_at.desc()).limit(limit)
+            result = await self.db_session.execute(stmt)
+            entries = result.scalars().all()
+            return [MemoryRetriever._to_dict(m, 0.0) for m in entries]
+        return await retriever.retrieve(
+            self.db_session,
+            self.user_id,
+            memory_type=memory_type,
+            limit=limit,
+        )
+
+    async def add_memory(
+        self,
+        content: str,
+        memory_type: str = "fact",
+        entity: Optional[str] = None,
+        confidence: float = 0.8,
+    ) -> Dict:
+        """手动添加一条记忆条目"""
+        self._require_db()
+        from app.memory.common import normalize_user_id
+        from app.models.memory_entry import MemoryEntry
+        from datetime import datetime
+
+        if memory_type not in ("fact", "preference", "procedural", "event", "summary"):
+            raise ValueError(f"Invalid memory_type: {memory_type}")
+
+        entry = MemoryEntry(
+            user_id=normalize_user_id(self.user_id),
+            session_id=self.session_id,
+            namespace="user" if self.user_id else "session",
+            memory_type=memory_type,
+            content=content.strip()[:500],
+            entity=(entity or "").strip() or None,
+            strength=0.8,
+            confidence=max(0.0, min(1.0, confidence)),
+        )
+        self.db_session.add(entry)
+        await self.db_session.commit()
+        await self.db_session.refresh(entry)
+        logger.info(
+            "memory.entry.added",
+            memory_id=str(entry.id),
+            memory_type=memory_type,
+            session_id=self.session_id,
+        )
+        return {
+            "id": str(entry.id),
+            "memory_type": entry.memory_type,
+            "content": entry.content,
+            "entity": entry.entity,
+            "strength": entry.strength,
+            "confidence": entry.confidence,
+        }
+
+    async def delete_memory(self, memory_id: str) -> bool:
+        """软删除一条记忆条目（archived_at 标记，保留审计）"""
+        self._require_db()
+        from app.memory.common import normalize_user_id
+        from app.models.memory_entry import MemoryEntry
+        from sqlalchemy import select
+
+        result = await self.db_session.execute(
+            select(MemoryEntry).where(MemoryEntry.id == memory_id)
+        )
+        entry = result.scalar_one_or_none()
+        if entry is None:
+            return False
+        # 校验归属
+        if self.user_id is not None and entry.user_id != normalize_user_id(self.user_id):
+            raise PermissionError("Cannot delete memory entry owned by another user")
+        entry.archived_at = datetime.utcnow()
+        entry.updated_at = datetime.utcnow()
+        await self.db_session.commit()
+        logger.info(
+            "memory.entry.deleted",
+            memory_id=memory_id,
+            session_id=self.session_id,
+        )
+        return True
+
     async def save_to_db(self) -> None:
         """
         强制保存到数据库

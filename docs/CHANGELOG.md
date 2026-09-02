@@ -5,9 +5,33 @@
 
 ---
 
-## 2026-09-02 mock 模式长期记忆摘要质量（无 LLM 降级路径）
+## 2026-09-02 启发式记忆提取：过滤一次性指令与提问
 
 **提交**：待提交
+
+**改了什么**：
+- `backend/app/memory/extractor.py`：
+  - 新增 `_HEURISTIC_COMMAND_MARKERS`（帮我/请你/能否/请解释/帮我写…）与 `_HEURISTIC_QUESTION_PREFIX`（为什么/怎么/如何/请/介绍/解释…）两类信号
+  - 启发式提取前先判定 `_is_command_or_question`，命中则跳过该消息
+- `backend/tests/test_memory_extractor_heuristic.py`：新增 9 项提取质量回归测试
+
+**为什么这么改**：
+- 无 LLM 时启发式提取只按关键词匹配，**指令与问题也会命中偏好/事实关键词**：
+  - 「请使用 Redis 做缓存」→ 命中 fact（使用/redis）→ 被当长期事实
+  - 「为什么 Python 比 Java 快」→ 命中 fact（python）→ 被当事实
+  - 「我希望你能帮我部署项目」→ 命中 preference（希望）→ 被当用户偏好
+- 这些一次性指令/提问沉淀后长期污染记忆库，检索时反复召回无关内容
+
+**解决了什么问题**：
+- 指令与提问不再误提取为长期记忆，记忆库只沉淀真实偏好/事实
+- 真实偏好（「我喜欢用空格缩进」）与事实（「项目采用 FastAPI」）提取不受影响
+- LLM 调用失败降级到启发式路径时同样受益
+
+---
+
+## 2026-09-02 mock 模式长期记忆摘要质量（无 LLM 降级路径）
+
+**提交**：`9ee9947`
 
 **改了什么**：
 - `backend/app/memory/long_term.py`：无 LLM 的 mock 模式摘要从「占位符」改为**增量拼接真实消息内容**（`role: content` 换行累积），受 `max_summary_length` 限制截断

@@ -57,6 +57,25 @@ _HEURISTIC_FACT_MARKERS = (
     "版本", "框架", "采用", "使用", "配置", "服务器", "仓库",
     "pytest", "redis", "postgresql", "docker", "python", "fastapi", "celery",
 )
+# 启发式模式：一次性指令 / 提问信号（命中即视为无需长期记忆）。
+# 不拦截则「请使用 Redis 做缓存」「为什么 Python 比 Java 快」这类
+# 指令/问题会因命中 fact/preference 关键词被误提取为长期记忆，污染记忆库。
+_HEURISTIC_COMMAND_MARKERS = (
+    "帮我", "请帮我", "你能否", "请你", "能否", "请解释", "请介绍",
+    "帮我写", "帮我实现", "帮我修复", "帮我优化", "帮我部署",
+)
+_HEURISTIC_QUESTION_PREFIX = re.compile(
+    r"^(为什么|怎么|如何|什么是|有哪些|可否|能不能|请|介绍|解释|"
+    r"推荐|告诉|列出|总结|翻译|比较|写一个|实现一个)"
+)
+
+
+def _is_command_or_question(content: str) -> bool:
+    """判断用户消息是否为一站式指令/提问（不应沉淀为长期记忆）"""
+    lowered = content.lower()
+    if any(k in lowered for k in _HEURISTIC_COMMAND_MARKERS):
+        return True
+    return bool(_HEURISTIC_QUESTION_PREFIX.match(content.strip()))
 
 
 class MemoryExtractor:
@@ -159,6 +178,9 @@ class MemoryExtractor:
                 continue
             content = (msg.get("content") or "").strip()
             if len(content) < 6:
+                continue
+            # 一次性指令 / 提问：即使命中偏好或事实关键词也不提取
+            if _is_command_or_question(content):
                 continue
             lowered = content.lower()
             if any(k in lowered for k in _HEURISTIC_PREFERENCES):

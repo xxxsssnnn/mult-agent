@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-09-02 e2e 补充：长期摘要跨请求可见性验证
+
+**提交**：待提交
+
+**改了什么**：
+- `backend/tests/test_e2e_memory.py`：新增 2 项检查
+  - `GET /api/v1/memory/{sid}/context` 端点可用性
+  - `long_term_summary` 跨请求可见且含会话消息内容（咖啡/吉他）
+
+**为什么这么改**：
+- 审计摘要链路时确认 `initialize → load_summary(metadata_["summary"]) → long_term.set_summary` 与 `consolidate → metadata_["summary"]` 是同一条路径，闭环完整
+- 但该闭环此前**无任何测试固化**：若未来 `load_summary` 读错字段或 consolidate 不再写回，摘要跨请求丢失将静默发生
+
+**解决了什么问题**：
+- 用真实 HTTP 链路固化「consolidation 摘要落库 → 跨请求加载可见」的契约，防止回归
+- 补上 `GET /context` 端点本身的 e2e 覆盖
+
+---
+
 ## 2026-09-02 测试基建：强制退出码与一键回归
 
 **提交**：`a8763ee`

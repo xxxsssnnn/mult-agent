@@ -107,6 +107,16 @@ async def run():
                 f"ctx={context[:160]}",
             )
 
+            # 5. 会话1 长期摘要落库且跨请求可见
+            r = await client.get(f"/api/v1/memory/{sid1}/context", headers=headers)
+            check("获取会话1 上下文", r.status_code == 200, f"status={r.status_code}")
+            summary = r.json().get("long_term_summary", "") or ""
+            check(
+                "长期摘要跨请求可见且含消息内容",
+                "咖啡" in summary or "吉他" in summary,
+                f"summary_len={len(summary)} summary={summary[:120]}",
+            )
+
 
 if __name__ == "__main__":
     asyncio.run(run())

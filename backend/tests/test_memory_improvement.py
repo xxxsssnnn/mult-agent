@@ -174,6 +174,7 @@ async def test_window_overflow_detection():
     print("✅ 窗口溢出检测正常工作")
     print("   - 短期记忆始终保持在窗口大小内")
     print("   - 超出的消息被正确捕获并返回")
+    return True
 
 
 async def main():
@@ -182,17 +183,22 @@ async def main():
     print("短期记忆滑动窗口改进 - 测试套件")
     print("=" * 80 + "\n")
     
+    import sys
+
+    all_ok = True
     try:
         # 测试1: 语义不丢失
         result1 = await test_no_semantic_loss()
-        
+        all_ok = all_ok and bool(result1)
+
         # 测试2: 窗口溢出检测
-        await test_window_overflow_detection()
-        
+        result2 = await test_window_overflow_detection()
+        all_ok = all_ok and result2 is not False
+
         print("\n" + "=" * 80)
         print("所有测试完成！")
         print("=" * 80)
-        
+
         if result1:
             print("\n🎉 改进成功！滑动窗口不再导致语义丢失")
             print("\n核心优势:")
@@ -200,15 +206,20 @@ async def main():
             print("  ✅ 短期记忆保持轻量，快速访问最近对话")
             print("  ✅ 长期记忆智能摘要，保留关键信息")
             print("  ✅ Agent始终拥有完整的上下文理解能力")
-        
+
     except Exception as e:
         print(f"\n❌ 测试失败: {str(e)}")
         import traceback
         traceback.print_exc()
+        all_ok = False
+
+    # 强制退出码：失败时返回非 0，避免 CI/回归脚本漏报
+    print(f"\n{'✅ 全部通过' if all_ok else '❌ 存在失败项'} (exit={0 if all_ok else 1})")
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":
     import os
     os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./multi_agent.db"
-    
+
     asyncio.run(main())

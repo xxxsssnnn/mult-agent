@@ -26,4 +26,12 @@ celery_app.conf.update(
     task_ignore_result=False,
 )
 
+# 定时调度（由 beat 服务执行，见 docker-compose 中 beat 服务）
+celery_app.conf.beat_schedule = {
+    "decay-memories-periodically": {
+        "task": "memory.decay_memories",
+        "schedule": settings.MEMORY_DECAY_INTERVAL_SECONDS,
+    },
+}
+
 celery_app.autodiscover_tasks(["app.tasks"])

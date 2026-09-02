@@ -20,6 +20,7 @@ os.environ.setdefault("OPENAI_API_KEY", "")
 from app.memory.extractor import MemoryExtractor
 from app.memory.updater import _content_similar, apply_memory_updates
 from app.memory.retriever import MemoryRetriever, _freshness, _relevance, _tokenize
+from app.memory.decay import apply_decay, decay_memories
 from app.models.memory_entry import MemoryEntry
 
 PASSED = []
@@ -214,6 +215,42 @@ def test_retriever_respects_limit():
     check("limit 生效", len(results) == 3)
 
 
+# ---------- 衰减与遗忘 ----------
+
+def test_decay_fresh_memory_barely_decays():
+    entry = make_entry("新记忆", strength=0.8, updated_at=datetime.utcnow())
+    apply_decay(entry)
+    check("新鲜记忆强度几乎不衰减", entry.strength > 0.79)
+
+
+def test_decay_old_memory_decays():
+    entry = make_entry("旧记忆", strength=0.8, updated_at=datetime.utcnow() - timedelta(days=30))
+    apply_decay(entry)
+    check("30 天旧记忆显著衰减", entry.strength < 0.5)
+
+
+def test_decay_frequently_accessed_decays_slower():
+    old = datetime.utcnow() - timedelta(days=30)
+    hot = make_entry("高频记忆", strength=0.8, updated_at=old)
+    hot.access_count = 10
+    cold = make_entry("低频记忆", strength=0.8, updated_at=old)
+    cold.access_count = 0
+    apply_decay(hot)
+    apply_decay(cold)
+    check("高频记忆衰减更慢", hot.strength > cold.strength)
+
+
+def test_decay_memories_archives_below_threshold():
+    now = datetime.utcnow()
+    strong = make_entry("强记忆", strength=0.9, updated_at=now - timedelta(days=1))
+    weak = make_entry("弱记忆", strength=0.05, updated_at=now - timedelta(days=1))
+    session = FakeSession(rows=[strong, weak])
+    result = run(decay_memories(session, now=now))
+    check("批量衰减扫描全部候选", result["scanned"] == 2)
+    check("低于阈值记忆被归档", weak.archived_at is not None)
+    check("强记忆保留", strong.archived_at is None)
+
+
 # ---------- 入口 ----------
 
 def main():
@@ -231,6 +268,10 @@ def main():
         test_retriever_ranks_by_query,
         test_retriever_ranks_by_strength_without_query,
         test_retriever_respects_limit,
+        test_decay_fresh_memory_barely_decays,
+        test_decay_old_memory_decays,
+        test_decay_frequently_accessed_decays_slower,
+        test_decay_memories_archives_below_threshold,
     ]
     for t in tests:
         t()

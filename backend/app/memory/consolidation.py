@@ -26,11 +26,17 @@ from app.models.memory_entry import MemoryEntry
 logger = structlog.get_logger(__name__)
 
 
-def _make_session():
-    """创建独立的数据库会话（NullPool 引擎，兼容不同 event loop）"""
+def make_async_session():
+    """创建独立的数据库会话（NullPool 引擎，兼容不同 event loop）。
+
+    供 consolidation 与 Celery 任务（decay 等）跨模块复用。
+    """
     engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
     session_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return engine, session_factory()
+
+
+_make_session = make_async_session  # 兼容别名
 
 
 async def build_session_summary(existing_summary: str, messages: list) -> str:

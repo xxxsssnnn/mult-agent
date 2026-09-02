@@ -454,3 +454,21 @@ async def delete_memory_entry(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete memory entry: {str(e)}",
         )
+
+
+@router.delete("/entries")
+async def clear_memory_entries(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """遗忘权：归档当前用户的全部记忆条目（软删除，保留审计轨迹）"""
+    try:
+        manager = _entry_manager("__clear__", current_user.id, db)
+        cleared = await manager.clear_memories()
+        return {"success": True, "cleared": cleared}
+    except Exception as e:
+        logger.error("Failed to clear memory entries", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to clear memory entries: {str(e)}",
+        )

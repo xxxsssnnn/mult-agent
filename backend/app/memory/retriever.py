@@ -17,6 +17,7 @@ import structlog
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.memory.common import normalize_user_id
 from app.models.memory_entry import MemoryEntry
 
@@ -99,6 +100,12 @@ class MemoryRetriever:
 
         result = await session.execute(stmt)
         candidates = result.scalars().all()
+
+        # 惰性衰减：检索时顺带对候选记忆应用时间衰减（无需定时任务）
+        if settings.MEMORY_DECAY_ENABLED:
+            from app.memory.decay import apply_decay
+            for m in candidates:
+                apply_decay(m)
 
         tokens = _tokenize(query or "")
         scored = []

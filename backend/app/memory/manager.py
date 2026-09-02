@@ -435,6 +435,29 @@ class MemoryManager:
         )
         return True
 
+    async def clear_memories(self) -> int:
+        """遗忘权：归档当前用户的全部记忆条目（软删除，保留审计）"""
+        self._require_db()
+        from app.memory.common import normalize_user_id
+        from app.models.memory_entry import MemoryEntry
+        from sqlalchemy import select
+
+        stmt = select(MemoryEntry).where(MemoryEntry.archived_at.is_(None))
+        if self.user_id is not None:
+            stmt = stmt.where(MemoryEntry.user_id == normalize_user_id(self.user_id))
+        result = await self.db_session.execute(stmt)
+        entries = result.scalars().all()
+        for entry in entries:
+            entry.archived_at = datetime.utcnow()
+            entry.updated_at = datetime.utcnow()
+        await self.db_session.commit()
+        logger.info(
+            "memory.entries.cleared",
+            count=len(entries),
+            user_id=str(self.user_id),
+        )
+        return len(entries)
+
     async def save_to_db(self) -> None:
         """
         强制保存到数据库

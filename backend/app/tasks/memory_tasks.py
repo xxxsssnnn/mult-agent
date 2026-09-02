@@ -42,3 +42,34 @@ def consolidate_memory_task(
     except Exception as exc:
         logger.exception("memory.consolidate_task.failed", session_id=session_id)
         raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    name="memory.decay_memories",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,
+    acks_late=True,
+)
+def decay_memories_task(self):
+    """定时衰减记忆强度并归档低强度记忆（Celery beat 调度）
+
+    compose 中由 beat 服务按 MEMORY_DECAY_INTERVAL_SECONDS 触发；
+    也可手动执行: celery -A app.celery_app call memory.decay_memories
+    """
+    from app.memory.consolidation import make_async_session
+    from app.memory.decay import decay_memories
+
+    engine, session = make_async_session()
+    try:
+        result = asyncio.run(decay_memories(session))
+        session.commit()
+        logger.info("memory.decay_task.ok", result=result)
+        return result
+    except Exception as exc:
+        session.rollback()
+        logger.exception("memory.decay_task.failed")
+        raise self.retry(exc=exc)
+    finally:
+        session.close()
+        engine.dispose()

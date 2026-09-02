@@ -57,6 +57,14 @@ class Settings:
     MEMORY_RETRIEVAL_ENABLED: bool = os.getenv("MEMORY_RETRIEVAL_ENABLED", "True").lower() == "true"
     # 上下文注入的相关记忆条数上限
     MEMORY_RETRIEVAL_TOP_K: int = int(os.getenv("MEMORY_RETRIEVAL_TOP_K", "3"))
+    # 记忆衰减（遗忘机制）
+    MEMORY_DECAY_ENABLED: bool = os.getenv("MEMORY_DECAY_ENABLED", "True").lower() == "true"
+    # 每日衰减系数（指数衰减 rate）
+    MEMORY_DECAY_RATE: float = float(os.getenv("MEMORY_DECAY_RATE", "0.02"))
+    # 强度低于该阈值的记忆将被归档（审计保留）
+    MEMORY_DECAY_ARCHIVE_BELOW: float = float(os.getenv("MEMORY_DECAY_ARCHIVE_BELOW", "0.1"))
+    # 定时衰减周期（秒，Celery beat）
+    MEMORY_DECAY_INTERVAL_SECONDS: int = int(os.getenv("MEMORY_DECAY_INTERVAL_SECONDS", "21600"))
 
 
 settings = Settings()

@@ -78,12 +78,22 @@ async def decay_memories(
     entries = result.scalars().all()
 
     archived = 0
+    archived_ids = []
     for entry in entries:
         apply_decay(entry, now)
         if entry.strength < settings.MEMORY_DECAY_ARCHIVE_BELOW:
             entry.archived_at = now
             archived += 1
+            archived_ids.append(entry.id)
         entry.updated_at = now
+
+    # 归档的记忆不再参与检索，同步清理向量索引（失败仅告警）
+    if archived_ids and settings.MEMORY_VECTOR_ENABLED:
+        try:
+            from app.memory.vector_store import memory_vector_store
+            memory_vector_store.remove_entries(archived_ids)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory.vector.decay_remove_failed")
 
     logger.info(
         "memory.decay.applied",

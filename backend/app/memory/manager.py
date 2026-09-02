@@ -449,6 +449,7 @@ class MemoryManager:
         self.db_session.add(entry)
         await self.db_session.commit()
         await self.db_session.refresh(entry)
+        await self._index_vector_entries([entry])
         logger.info(
             "memory.entry.added",
             memory_id=str(entry.id),
@@ -483,12 +484,34 @@ class MemoryManager:
         entry.archived_at = datetime.utcnow()
         entry.updated_at = datetime.utcnow()
         await self.db_session.commit()
+        await self._remove_vector_entries([entry.id])
         logger.info(
             "memory.entry.deleted",
             memory_id=memory_id,
             session_id=self.session_id,
         )
         return True
+
+    async def _index_vector_entries(self, entries) -> None:
+        """同步记忆条目到向量索引（失败仅告警，不阻断）"""
+        if not settings.MEMORY_VECTOR_ENABLED or not entries:
+            return
+        try:
+            import asyncio
+            from app.memory.vector_store import memory_vector_store
+            await asyncio.to_thread(memory_vector_store.index_entries, entries)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory.vector.sync_failed")
+
+    async def _remove_vector_entries(self, ids) -> None:
+        """同步移除记忆条目向量索引（失败仅告警，不阻断）"""
+        if not settings.MEMORY_VECTOR_ENABLED or not ids:
+            return
+        try:
+            from app.memory.vector_store import memory_vector_store
+            memory_vector_store.remove_entries(ids)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory.vector.remove_sync_failed")
 
     async def clear_memories(self) -> int:
         """遗忘权：归档当前用户的全部记忆条目（软删除，保留审计）"""
@@ -506,6 +529,7 @@ class MemoryManager:
             entry.archived_at = datetime.utcnow()
             entry.updated_at = datetime.utcnow()
         await self.db_session.commit()
+        await self._remove_vector_entries([e.id for e in entries])
         logger.info(
             "memory.entries.cleared",
             count=len(entries),

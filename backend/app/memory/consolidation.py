@@ -97,6 +97,19 @@ async def _extract_and_apply(session, user_id, session_id, messages: list) -> li
         return []
 
 
+async def _sync_vector_index(entries: list) -> None:
+    """把记忆条目同步到向量索引（线程池执行，避免阻塞事件循环）"""
+    if not entries:
+        return
+    try:
+        import asyncio
+
+        from app.memory.vector_store import memory_vector_store
+        await asyncio.to_thread(memory_vector_store.index_entries, entries)
+    except Exception:  # noqa: BLE001
+        logger.warning("memory.vector.sync_failed", count=len(entries))
+
+
 async def consolidate_memory(
     session_id: str,
     user_id=None,
@@ -146,6 +159,10 @@ async def consolidate_memory(
         extracted = await _extract_and_apply(session, user_id, session_id, messages)
 
         await session.commit()
+
+        # 6. 同步向量索引（语义检索），失败仅告警不阻断
+        if settings.MEMORY_VECTOR_ENABLED:
+            await _sync_vector_index(extracted)
         logger.info(
             "memory.consolidated",
             session_id=session_id,

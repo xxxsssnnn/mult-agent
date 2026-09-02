@@ -65,6 +65,8 @@ class Settings:
     MEMORY_DECAY_ARCHIVE_BELOW: float = float(os.getenv("MEMORY_DECAY_ARCHIVE_BELOW", "0.1"))
     # 定时衰减周期（秒，Celery beat）
     MEMORY_DECAY_INTERVAL_SECONDS: int = int(os.getenv("MEMORY_DECAY_INTERVAL_SECONDS", "21600"))
+    # 向量语义检索（基于 ChromaDB，懒加载，不可用自动降级）
+    MEMORY_VECTOR_ENABLED: bool = os.getenv("MEMORY_VECTOR_ENABLED", "True").lower() == "true"
 
 
 settings = Settings()

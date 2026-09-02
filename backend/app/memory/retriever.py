@@ -1,14 +1,14 @@
-"""记忆检索器 - 混合检索（关键词相关度 + 记忆强度 + 时间新鲜度）
+"""记忆检索器 - 混合检索（关键词相关度 + 记忆强度 + 时间新鲜度 + 向量语义）
 
 打分公式:
-    score = 0.5 * relevance + 0.3 * strength + 0.2 * freshness
+    score = 0.35 * relevance + 0.2 * strength + 0.15 * freshness + 0.3 * vector_sim
 
-无查询时按记忆质量（strength/新鲜度）排序，用于上下文注入。
-
-向量检索（MEMORY_VECTOR_ENABLED）作为后续扩展点：
-若启用向量后端，可在本类上增加 vector_search 实现并优先调用。
+- 向量相似度分量仅在 MEMORY_VECTOR_ENABLED 且向量库可用时参与
+  （不可用自动降级，不影响其余分量）
+- 无查询时按记忆质量（strength/新鲜度）排序，用于上下文注入
 """
 
+import asyncio
 import re
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -23,9 +23,10 @@ from app.models.memory_entry import MemoryEntry
 
 logger = structlog.get_logger(__name__)
 
-W_RELEVANCE = 0.5
-W_STRENGTH = 0.3
-W_FRESHNESS = 0.2
+W_RELEVANCE = 0.35
+W_STRENGTH = 0.2
+W_FRESHNESS = 0.15
+W_VECTOR = 0.3
 FRESHNESS_HALF_LIFE_DAYS = 7.0
 
 
@@ -109,6 +110,18 @@ class MemoryRetriever:
             for m in candidates:
                 apply_decay(m)
 
+        # 向量语义命中（不可用/失败时自动降级为空）
+        vector_hits: Dict[str, float] = {}
+        if query and settings.MEMORY_VECTOR_ENABLED:
+            try:
+                from app.memory.vector_store import memory_vector_store
+                hits = await asyncio.to_thread(
+                    memory_vector_store.search, query, 50, user_id
+                )
+                vector_hits = {str(k): v for k, v in (hits or [])}
+            except Exception:  # noqa: BLE001
+                vector_hits = {}
+
         tokens = _tokenize(query or "")
         scored = []
         for m in candidates:
@@ -117,6 +130,7 @@ class MemoryRetriever:
                 W_RELEVANCE * relevance
                 + W_STRENGTH * (m.strength or 0.5)
                 + W_FRESHNESS * _freshness(m.updated_at)
+                + W_VECTOR * vector_hits.get(str(m.id), 0.0)
             )
             scored.append((score, m))
 

@@ -21,7 +21,11 @@ from app.memory.extractor import MemoryExtractor
 from app.memory.updater import _content_similar, apply_memory_updates
 from app.memory.retriever import MemoryRetriever, _freshness, _relevance, _tokenize
 from app.memory.decay import apply_decay, decay_memories
+from app.memory.vector_store import memory_vector_store
 from app.models.memory_entry import MemoryEntry
+
+# 测试环境无 Chroma 基础设施：强制向量库"不可用"，验证优雅降级
+memory_vector_store._available = False
 
 PASSED = []
 
@@ -224,6 +228,44 @@ def test_retriever_pagination_offset():
     check("第二页 2 条且不与第一页重叠", len(second) == 2 and second[0]["id"] != first[0]["id"])
 
 
+def test_retriever_vector_boost():
+    """向量命中应显著提升对应记忆的排序"""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    rows = [
+        make_entry("用户偏好 Python 编程", memory_type="preference", strength=0.5),
+        make_entry("今天天气不错", memory_type="fact", strength=0.5),
+    ]
+    session = FakeSession(rows=rows)
+    fake_store = SimpleNamespace(
+        _available=True,
+        search=lambda query, top_k=10, user_id=None: [(rows[0].id, 0.95)],
+        index_entries=lambda entries: 0,
+        remove_entries=lambda ids: 0,
+    )
+    with patch("app.memory.vector_store.memory_vector_store", fake_store):
+        results = run(
+            MemoryRetriever(top_k=10).retrieve(
+                session, None, query="Python 编程偏好", limit=2
+            )
+        )
+    check("向量命中的记忆排第一", results[0]["id"] == str(rows[0].id))
+
+
+def test_retriever_vector_degrades_gracefully():
+    """向量库不可用（_available=False）时检索正常降级，不抛异常"""
+    rows = [
+        make_entry("用户偏好 Python 编程", memory_type="preference", strength=0.8),
+        make_entry("今天天气不错", memory_type="fact", strength=0.5),
+    ]
+    session = FakeSession(rows=rows)
+    results = run(
+        MemoryRetriever(top_k=10).retrieve(session, None, query="Python", limit=2)
+    )
+    check("向量不可用时检索仍返回结果", len(results) == 2)
+
+
 # ---------- 衰减与遗忘 ----------
 
 def test_decay_fresh_memory_barely_decays():
@@ -278,6 +320,8 @@ def main():
         test_retriever_ranks_by_strength_without_query,
         test_retriever_respects_limit,
         test_retriever_pagination_offset,
+        test_retriever_vector_boost,
+        test_retriever_vector_degrades_gracefully,
         test_decay_fresh_memory_barely_decays,
         test_decay_old_memory_decays,
         test_decay_frequently_accessed_decays_slower,

@@ -54,4 +54,10 @@ class MemoryEntry(Base):
             "ix_memory_user_strength_updated",
             "user_id", "strength", "updated_at",
         ),
+        # 检索主查询 user_id + archived_at IS NULL + ORDER BY strength/updated_at，
+        # 旧复合索引无法过滤归档行；此索引覆盖活跃条目检索路径
+        Index(
+            "ix_memory_user_archived_strength_updated",
+            "user_id", "archived_at", "strength", "updated_at",
+        ),
     )

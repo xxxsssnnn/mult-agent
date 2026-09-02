@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-09-02 记忆检索归档过滤复合索引（迁移 0002）
+
+**提交**：待提交
+
+**改了什么**：
+- `backend/alembic/versions/0002_add_memory_archive_index.py`：新增迁移——在 `memory_entries` 建复合索引 `(user_id, archived_at, strength, updated_at)`
+- `backend/app/models/memory_entry.py`：模型同步增加该索引（create_all 兜底路径一致）
+- `backend/tests/test_migrations.py`：断言迁移版本到 `0002` 且新索引存在
+
+**为什么这么改**：
+- 检索主查询是 `WHERE user_id = ? AND archived_at IS NULL ORDER BY strength DESC, updated_at DESC LIMIT n`；旧复合索引 `(user_id, strength, updated_at)` **无法过滤归档行**——用户条目增长（event 累积、历史归档）后每次检索都要扫描含归档行的全量集合，随归档量增长性能劣化
+
+**解决了什么问题**：
+- 活跃条目检索路径（用户 + 未归档 + 强度/时间排序）被索引完整覆盖，检索成本只与活跃条目数相关
+- 已有库通过 `alembic upgrade head` 自动应用；全新库 0001→0002 顺序建表
+- 迁移回归测试固化（版本号 + 索引存在性）
+
+---
+
 ## 2026-09-02 删除会话时归档其记忆条目（孤儿数据防护）
 
 **提交**：`6ab3f11`

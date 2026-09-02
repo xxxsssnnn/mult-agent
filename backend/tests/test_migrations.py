@@ -84,7 +84,8 @@ def test_sqlite_migration_creates_tables():
     idx = _memory_indexes()
     check("memory_entries 单列索引齐全", {"ix_memory_entries_user_id", "ix_memory_entries_session_id", "ix_memory_entries_memory_type", "ix_memory_entries_expires_at"} <= idx)
     check("memory_entries 复合索引存在", "ix_memory_user_strength_updated" in idx)
-    check("alembic_version 记录到 head", _alembic_version() == "0001")
+    check("归档过滤复合索引存在", "ix_memory_user_archived_strength_updated" in idx)
+    check("alembic_version 记录到 head", _alembic_version() == "0002")
 
 
 def test_init_db_idempotent():

@@ -23,7 +23,8 @@ $tests = @(
     "tests\test_memory_extractor_heuristic.py",
     "tests\test_memory_concurrency.py",
     "tests\test_e2e_memory.py",
-    "tests\test_migrations.py"
+    "tests\test_migrations.py",
+    "tests\test_memory_decay_expiry.py"
 )
 
 $failed = @()

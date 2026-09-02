@@ -61,7 +61,8 @@ async def decay_memories(
         now: 当前时间（测试注入用）
 
     Returns:
-        {"scanned": n, "decayed": n, "archived": m}
+        {"scanned": n, "decayed": n, "archived": m, "expired": e}
+        其中 expired 为归档中因合规过期（expires_at <= now）归档的条目数。
     """
     from app.memory.common import normalize_user_id
 
@@ -78,9 +79,22 @@ async def decay_memories(
     entries = result.scalars().all()
 
     archived = 0
+    expired = 0
+    decayed = 0
     archived_ids = []
     for entry in entries:
+        # 合规保留策略到期：直接归档，不再做时间衰减（避免无意义更新）。
+        # 检索层已按 expires_at 过滤，但从未真正落库归档；
+        # 此处由批量衰减任务兜底清理，保证过期数据不永久留存。
+        if entry.expires_at is not None and entry.expires_at <= now:
+            entry.archived_at = now
+            archived += 1
+            expired += 1
+            archived_ids.append(entry.id)
+            entry.updated_at = now
+            continue
         apply_decay(entry, now)
+        decayed += 1
         if entry.strength < settings.MEMORY_DECAY_ARCHIVE_BELOW:
             entry.archived_at = now
             archived += 1
@@ -99,10 +113,12 @@ async def decay_memories(
         "memory.decay.applied",
         scanned=len(entries),
         archived=archived,
+        expired=expired,
         user_id=str(user_id),
     )
     return {
         "scanned": len(entries),
-        "decayed": len(entries),
+        "decayed": decayed,
         "archived": archived,
+        "expired": expired,
     }

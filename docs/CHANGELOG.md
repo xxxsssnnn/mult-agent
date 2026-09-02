@@ -7,7 +7,7 @@
 
 ## 2026-09-02 测试基建：强制退出码与一键回归
 
-**提交**：待提交
+**提交**：`a8763ee`
 
 **改了什么**：
 - `backend/tests/test_memory_improvement.py`：

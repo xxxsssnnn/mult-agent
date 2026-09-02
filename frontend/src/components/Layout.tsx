@@ -5,6 +5,7 @@ import {
   RobotOutlined,
   TagsOutlined,
   MessageOutlined,
+  DatabaseOutlined,
   LogoutOutlined,
 } from '@ant-design/icons'
 import { useState } from 'react'
@@ -31,6 +32,11 @@ const menuItems = [
     key: '/conversations',
     icon: <MessageOutlined />,
     label: '对话管理',
+  },
+  {
+    key: '/memories',
+    icon: <DatabaseOutlined />,
+    label: '记忆管理',
   },
 ]
 

@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard'
 import Agents from './pages/Agents'
 import Tasks from './pages/Tasks'
 import Conversations from './pages/Conversations'
+import Memories from './pages/Memories'
 
 function App() {
   return (
@@ -20,6 +21,7 @@ function App() {
             <Route path="agents" element={<Agents />} />
             <Route path="tasks" element={<Tasks />} />
             <Route path="conversations" element={<Conversations />} />
+            <Route path="memories" element={<Memories />} />
           </Route>
         </Routes>
       </BrowserRouter>

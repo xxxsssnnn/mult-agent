@@ -29,13 +29,46 @@ W_FRESHNESS = 0.15
 W_VECTOR = 0.3
 FRESHNESS_HALF_LIFE_DAYS = 7.0
 
+# 中英文停用词：查询中的虚词/口语衬词会稀释命中率分母，分词时剔除
+_STOPWORDS = {
+    # 中文两字词（bigram 无语义实指的常见衬词）
+    "这个", "那个", "我们", "你们", "他们", "她们", "它们", "自己", "大家",
+    "一个", "一些", "一点", "什么", "怎么", "怎样", "哪里", "谁谁", "哪个",
+    "想要", "可以", "应该", "就是", "因为", "所以", "如果", "虽然", "但是",
+    "然后", "还有", "没有", "不是", "不要", "不会", "不能", "什么", "时候",
+    # 英文停用词（常见子集）
+    "the", "a", "an", "to", "of", "in", "on", "at", "by", "for", "and",
+    "or", "but", "is", "are", "was", "were", "be", "been", "being", "with",
+    "without", "from", "as", "it", "its", "this", "that", "these", "those",
+    "i", "you", "he", "she", "we", "they", "me", "my", "your", "his", "her",
+    "our", "their", "have", "has", "had", "do", "does", "did", "will",
+    "would", "can", "could", "should", "shall", "may", "might", "must",
+    "about", "into", "over", "under", "again", "then", "than", "so", "too",
+    "very", "just", "please", "what", "when", "where", "which", "who",
+    "whom", "why", "how",
+}
+
 
 def _tokenize(text: str) -> set:
-    """粗粒度分词：英文单词（≥2 字符）+ 中文连续二字以上片段"""
+    """粗粒度分词：英文单词（≥2 字符）+ 中文连续串滑动窗口 bigram，过滤停用词。
+
+    中文采用滑动窗口（步长 1）而非贪婪非重叠片段：贪婪 `{2}` 会把
+    「喝咖啡」切成「喝咖」而丢「咖啡」，导致查询「咖啡」时错位漏召回。
+    滑窗 bigram 虽引入少量噪声（如「天天」），但能大幅提高语义重叠召回。
+    """
     if not text:
         return set()
     text = text.lower()
-    return set(re.findall(r"[a-z0-9_]{2,}|[\u4e00-\u9fa5]{2}", text))
+    tokens = set()
+    for w in re.findall(r"[a-z0-9_]{2,}", text):
+        if w not in _STOPWORDS:
+            tokens.add(w)
+    for run in re.findall(r"[\u4e00-\u9fa5]+", text):
+        for i in range(len(run) - 1):
+            bigram = run[i : i + 2]
+            if bigram not in _STOPWORDS:
+                tokens.add(bigram)
+    return tokens
 
 
 def _relevance(content: str, tokens: set) -> float:
@@ -141,7 +174,15 @@ class MemoryRetriever:
         tokens = _tokenize(query or "")
         scored = []
         for m in candidates:
-            relevance = _relevance(m.content, tokens) if tokens else 0.5
+            if tokens:
+                # 内容与实体字段取较高相关度：按实体提问（如「peter 的偏好」）时
+                # 即使正文未含实体名也能命中
+                relevance = max(
+                    _relevance(m.content, tokens),
+                    _relevance(m.entity or "", tokens),
+                )
+            else:
+                relevance = 0.5
             score = (
                 W_RELEVANCE * relevance
                 + W_STRENGTH * (m.strength or 0.5)

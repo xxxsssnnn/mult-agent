@@ -196,26 +196,51 @@ class MemoryManager:
                 )
 
         # 触发异步 consolidation（批量达到阈值或有消息被驱逐时）。
-        # 批次持久化在会话 metadata_，跨请求累积；未达阈值时写回，达到阈值时清空。
+        # 批次持久化在会话 metadata_，跨请求累积；未达阈值时写回，达到阈值时原子领取。
         should_trigger = (
             settings.MEMORY_CONSOLIDATION_ENABLED
             and len(self._consolidation_pending)
             >= settings.MEMORY_CONSOLIDATION_BATCH_SIZE
         ) or evicted_messages
         if should_trigger:
-            batch = list(self._consolidation_pending)
-            self._consolidation_pending.clear()
             if self.persistence:
                 try:
+                    # 先合并本次新增，再原子领取整个持久化批次。
+                    # 并发触发的多个请求中只有一个能领取到批次，其余得到空列表，
+                    # 从而避免同一批消息被重复整合。
                     await self.persistence.save_pending_consolidation(
                         self.session_id, self._consolidation_pending
                     )
+                    batch = await self.persistence.claim_pending_consolidation(
+                        self.session_id
+                    )
                 except Exception:
                     logger.warning(
-                        "Failed to clear pending consolidation",
+                        "Failed to claim pending consolidation",
                         session_id=self.session_id,
                     )
-            await self._trigger_consolidation(batch)
+                    batch = []
+            else:
+                batch = list(self._consolidation_pending)
+            self._consolidation_pending.clear()
+            if batch:
+                succeeded = await self._trigger_consolidation(batch)
+                if not succeeded and self.persistence:
+                    # 整合失败：批次回队，等待后续请求重试，避免消息丢失
+                    try:
+                        await self.persistence.save_pending_consolidation(
+                            self.session_id, batch
+                        )
+                        logger.warning(
+                            "memory.consolidation.requeued",
+                            session_id=self.session_id,
+                            messages=len(batch),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to requeue consolidation batch",
+                            session_id=self.session_id,
+                        )
         elif self.persistence:
             try:
                 await self.persistence.save_pending_consolidation(
@@ -235,11 +260,14 @@ class MemoryManager:
             evicted_count=len(evicted_messages)
         )
 
-    async def _trigger_consolidation(self, messages: List[Dict]) -> None:
-        """触发异步记忆整合（Redis 可用时走 Celery，否则内联降级）"""
+    async def _trigger_consolidation(self, messages: List[Dict]) -> bool:
+        """触发异步记忆整合（Redis 可用时走 Celery，否则内联降级）。
+
+        Returns:
+            bool: 整合是否成功领取执行（用于失败回队）
+        """
         if not self._use_celery:
-            await self._consolidate_inline(messages)
-            return
+            return await self._consolidate_inline(messages)
 
         try:
             from app.tasks.memory_tasks import consolidate_memory_task
@@ -253,6 +281,7 @@ class MemoryManager:
                 session_id=self.session_id,
                 messages=len(messages),
             )
+            return True
         except Exception as exc:
             # 投递异常（如 broker 连接问题）：内联降级执行
             logger.warning(
@@ -260,18 +289,20 @@ class MemoryManager:
                 session_id=self.session_id,
                 error=str(exc),
             )
-            await self._consolidate_inline(messages)
+            return await self._consolidate_inline(messages)
 
-    async def _consolidate_inline(self, messages: List[Dict]) -> None:
-        """内联执行记忆整合（API 进程内，供本地/降级场景）"""
+    async def _consolidate_inline(self, messages: List[Dict]) -> bool:
+        """内联执行记忆整合（API 进程内，供本地/降级场景）。返回是否成功。"""
         try:
             from app.memory.consolidation import consolidate_memory
             await consolidate_memory(self.session_id, self.user_id, messages)
+            return True
         except Exception:
             logger.exception(
                 "memory.consolidation.inline_failed",
                 session_id=self.session_id,
             )
+            return False
 
     async def get_context(self) -> str:
         """

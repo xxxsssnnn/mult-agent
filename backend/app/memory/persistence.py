@@ -18,6 +18,11 @@ from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
 
+# 模块级共享锁池：MemoryPersistence 每请求重建，pending 批次互斥锁必须
+# 跨实例共享（进程内按 session_id 唯一），否则并发请求各自持锁形同虚设。
+# 单线程 asyncio 事件循环中 dict 的 get/set 无 await 中断，天然原子。
+_PENDING_LOCKS: Dict[str, asyncio.Lock] = {}
+
 
 class MemoryPersistence:
     """
@@ -35,6 +40,40 @@ class MemoryPersistence:
         """
         self.db = db_session
         logger.info("Memory persistence initialized")
+
+    def _get_session_lock(self, key: str) -> asyncio.Lock:
+        """获取（惰性创建）会话级互斥锁。
+
+        锁存储在模块级共享池：MemoryPersistence 实例每请求重建，实例级锁无法
+        跨请求互斥。单线程事件循环内 dict get/set 原子，无需额外守卫。
+        """
+        lock = _PENDING_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _PENDING_LOCKS[key] = lock
+        return lock
+
+    @staticmethod
+    def _merge_pending(current: List[Dict], incoming: List[Dict]) -> List[Dict]:
+        """合并待整合批次：按 (role, content) 去重，旧批次在前，新批次在后。
+
+        并发请求各自基于旧快照写入时，合并语义保证不丢失任何消息。
+        """
+        merged: List[Dict] = []
+        seen = set()
+        for item in list(current) + list(incoming):
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role", "user")
+            content = item.get("content", "")
+            if not content:
+                continue
+            key = (role, content)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"role": role, "content": content})
+        return merged
 
     async def _run_with_retry(self, operation_name: str, coro_factory, **log_ctx):
         """执行写入操作并带重试。
@@ -278,41 +317,79 @@ class MemoryPersistence:
         MemoryManager 每请求重建，待整合批次跨请求持久化在会话
         metadata_["pending_consolidation"]，避免跨请求场景下批次无法累积。
         """
-        result = await self.db.execute(
-            select(Conversation).where(Conversation.session_id == session_id)
-        )
-        conversation = result.scalar_one_or_none()
-        if not conversation:
-            return []
-        meta = conversation.metadata_ or {}
-        pending = meta.get("pending_consolidation") or []
-        return [m for m in pending if isinstance(m, dict) and m.get("content")]
-
-    async def save_pending_consolidation(
-        self, session_id: str, pending: List[Dict]
-    ) -> None:
-        """持久化待整合的消息批次到会话 metadata_。"""
-
-        async def _do():
+        async with self._get_session_lock(session_id):
             result = await self.db.execute(
                 select(Conversation).where(Conversation.session_id == session_id)
             )
             conversation = result.scalar_one_or_none()
             if not conversation:
-                return
-            # JSON 列不支持 in-place 修改跟踪，必须重建 dict 触发 dirty
-            meta = dict(conversation.metadata_ or {})
-            meta["pending_consolidation"] = [
-                {"role": m.get("role", "user"), "content": m.get("content", "")}
-                for m in pending
-                if m.get("content")
-            ]
-            conversation.metadata_ = meta
-            conversation.updated_at = datetime.utcnow()
-            await self.db.commit()
+                return []
+            meta = conversation.metadata_ or {}
+            pending = meta.get("pending_consolidation") or []
+            return [m for m in pending if isinstance(m, dict) and m.get("content")]
+
+    async def save_pending_consolidation(
+        self, session_id: str, pending: List[Dict]
+    ) -> None:
+        """持久化待整合的消息批次到会话 metadata_。
+
+        合并语义（非覆盖）：在数据库当前批次基础上追加传入批次并按内容去重。
+        配合会话级锁，即使多个请求并发写入也不会丢失彼此的消息。
+        """
+
+        async def _do():
+            async with self._get_session_lock(session_id):
+                result = await self.db.execute(
+                    select(Conversation).where(Conversation.session_id == session_id)
+                )
+                conversation = result.scalar_one_or_none()
+                if not conversation:
+                    return
+                # JSON 列不支持 in-place 修改跟踪，必须重建 dict 触发 dirty
+                meta = dict(conversation.metadata_ or {})
+                meta["pending_consolidation"] = self._merge_pending(
+                    meta.get("pending_consolidation") or [], pending
+                )
+                conversation.metadata_ = meta
+                conversation.updated_at = datetime.utcnow()
+                await self.db.commit()
 
         await self._run_with_retry(
             "save_pending_consolidation", _do, session_id=session_id
+        )
+
+    async def claim_pending_consolidation(self, session_id: str) -> List[Dict]:
+        """原子领取待整合批次并清空（单事务 + 会话级锁）。
+
+        并发触发 consolidation 的多个请求中，只有一个能领取到非空批次，
+        其余返回空列表，从而保证同一批消息不会被重复整合。
+        """
+
+        async def _do():
+            async with self._get_session_lock(session_id):
+                result = await self.db.execute(
+                    select(Conversation).where(Conversation.session_id == session_id)
+                )
+                conversation = result.scalar_one_or_none()
+                if not conversation:
+                    return []
+                meta = dict(conversation.metadata_ or {})
+                pending = meta.get("pending_consolidation") or []
+                valid = [
+                    {"role": m.get("role", "user"), "content": m.get("content", "")}
+                    for m in pending
+                    if isinstance(m, dict) and m.get("content")
+                ]
+                if not valid:
+                    return []
+                meta["pending_consolidation"] = []
+                conversation.metadata_ = meta
+                conversation.updated_at = datetime.utcnow()
+                await self.db.commit()
+                return valid
+
+        return await self._run_with_retry(
+            "claim_pending_consolidation", _do, session_id=session_id
         )
 
     async def delete_conversation(self, session_id: str) -> bool:

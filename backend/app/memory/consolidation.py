@@ -56,19 +56,41 @@ async def build_session_summary(existing_summary: str, messages: list) -> str:
 
 
 async def save_event_entries(session, session_id: str, user_id, messages: list) -> list:
-    """把消息批次保存为 event 类型记忆条目（溯源/审计）"""
-    entries = []
+    """把消息批次保存为 event 类型记忆条目（溯源/审计）。
+
+    幂等：同一会话中已存在相同内容的 event 条目则跳过，防止
+    consolidation 重复执行（并发触发 / Celery 重试）产生重复条目。
+    """
+    candidates = []
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
         if not content:
+            continue
+        candidates.append((role, content, f"{role}: {content}"))
+    if not candidates:
+        return []
+
+    existing_result = await session.execute(
+        select(MemoryEntry.content).where(
+            MemoryEntry.session_id == session_id,
+            MemoryEntry.memory_type == "event",
+            MemoryEntry.archived_at.is_(None),
+            MemoryEntry.content.in_([c[2] for c in candidates]),
+        )
+    )
+    existing = set(existing_result.scalars().all())
+
+    entries = []
+    for role, content, rendered in candidates:
+        if rendered in existing:
             continue
         entry = MemoryEntry(
             user_id=user_id,
             session_id=session_id,
             namespace="session",
             memory_type="event",
-            content=f"{role}: {content}",
+            content=rendered,
             strength=0.5,
             confidence=0.5,
         )

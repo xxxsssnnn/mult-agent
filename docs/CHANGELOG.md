@@ -7,7 +7,7 @@
 
 ## 2026-09-02 删除会话时归档其记忆条目（孤儿数据防护）
 
-**提交**：待提交
+**提交**：`6ab3f11`
 
 **改了什么**：
 - `backend/app/memory/persistence.py`：`delete_conversation` 在删除会话及其消息的同时，**软归档该会话产生的全部记忆条目**（`archived_at` 标记，保留审计轨迹）

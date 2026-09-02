@@ -78,14 +78,20 @@ class LongTermMemory:
             except Exception as e:
                 logger.warning("Failed to update summary", error=str(e))
         else:
-            # Mock模式：简单保存最近的消息
+            # Mock模式：增量拼接摘要（含消息内容），受 max_summary_length 限制。
+            # 旧实现把摘要覆盖为 "[Mock Summary] Recent N messages" 占位符：
+            #  - 不包含任何消息内容，长期记忆对检索/展示无信息量
+            #  - set_summary(旧摘要) 后 add_message 会覆盖旧摘要，增量累积失效
             self.recent_messages.append({"role": role, "content": content})
             # 只保留最近10条
             if len(self.recent_messages) > 10:
                 self.recent_messages = self.recent_messages[-10:]
-            
-            # 生成简单摘要
-            self.summary = f"[Mock Summary] Recent {len(self.recent_messages)} messages"
+
+            line = f"{role}: {content}"
+            self.summary = (self.summary + "\n" + line).strip()
+            if len(self.summary) > self.max_summary_length:
+                # 超长截断（保留头部，优先保留早期脉络）
+                self.summary = self.summary[: self.max_summary_length]
         
         logger.debug(
             "Message added to long-term memory",

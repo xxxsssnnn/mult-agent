@@ -5,9 +5,31 @@
 
 ---
 
-## 2026-09-02 短期记忆窗口恢复幂等（跨请求/跨 worker）
+## 2026-09-02 mock 模式长期记忆摘要质量（无 LLM 降级路径）
 
 **提交**：待提交
+
+**改了什么**：
+- `backend/app/memory/long_term.py`：无 LLM 的 mock 模式摘要从「占位符」改为**增量拼接真实消息内容**（`role: content` 换行累积），受 `max_summary_length` 限制截断
+- `backend/tests/test_memory_summary_mock.py`：新增 8 项摘要质量回归测试
+- 修复后 `test_memory_improvement.py::test_no_semantic_loss` 的 4 项语义断言（学习Python / 数据类型 / 列表元组 / 学生管理）全部由「丢失」变为「已保留」
+
+**为什么这么改**：
+- 旧实现每次 `add_message` 把摘要覆盖为 `"[Mock Summary] Recent N messages"`：
+  - 摘要**不含任何消息内容**，长期记忆对检索/展示零信息量
+  - `set_summary(旧摘要)` 后调用 `add_message` 会把旧摘要**覆盖**，增量累积失效——每次整合只反映最近一个批次，历史脉络全部丢失
+- `test_no_semantic_loss`（既有测试）的语义完整性断言此前实际全部失败，但因打印式测试无 exit code 校验而未被发现
+
+**解决了什么问题**：
+- 无 LLM 环境（本地/生产降级）下长期记忆摘要保留真实消息内容
+- 增量整合（旧摘要 + 新批次）正确累积，不丢历史
+- 摘要长度有界（`max_summary_length` 截断）
+
+---
+
+## 2026-09-02 短期记忆窗口恢复幂等（跨请求/跨 worker）
+
+**提交**：`a694c4c`
 
 **改了什么**：
 - `backend/app/memory/manager.py`：`initialize` 恢复短期记忆窗口前先检查 store 是否已有数据；**仅当 store 为空时**才从 DB 重建窗口

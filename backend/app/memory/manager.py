@@ -99,12 +99,32 @@ class MemoryManager:
             if messages:
                 logger.info(f"Loading {len(messages)} historical messages")
                 
-                # 将消息添加到短期记忆（只添加最近的）
+                # 将消息添加到短期记忆（只添加最近的）。
+                # 仅在 store 为空时重建窗口：
+                #  - 进程内 store 每次请求新建（空），必须从 DB 恢复
+                #  - Redis store 跨请求/跨 worker 持久，已含窗口；
+                #    若每请求重复追加相同历史，窗口会重复累积、顺序错乱
                 window_size = getattr(settings, 'MEMORY_SHORT_TERM_WINDOW_SIZE', 5)
                 recent_messages = messages[-window_size * 2:]  # 取最后N轮（user+assistant）
-                
-                for msg in recent_messages:
-                    await self.short_term.add_message(msg["role"], msg["content"])
+
+                try:
+                    existing = await self.short_term.get_message_count()
+                except Exception:
+                    logger.warning(
+                        "Failed to inspect short-term store, restoring from DB",
+                        session_id=self.session_id,
+                    )
+                    existing = 0
+
+                if existing == 0:
+                    for msg in recent_messages:
+                        await self.short_term.add_message(msg["role"], msg["content"])
+                else:
+                    logger.info(
+                        "Short-term window already present, skip restore",
+                        session_id=self.session_id,
+                        existing=existing,
+                    )
                 
                 # 加载或生成摘要
                 summary = await self.persistence.load_summary(self.session_id)

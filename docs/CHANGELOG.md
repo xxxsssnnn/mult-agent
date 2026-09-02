@@ -5,9 +5,28 @@
 
 ---
 
+## 2026-09-02 短期记忆窗口恢复幂等（跨请求/跨 worker）
+
+**提交**：待提交
+
+**改了什么**：
+- `backend/app/memory/manager.py`：`initialize` 恢复短期记忆窗口前先检查 store 是否已有数据；**仅当 store 为空时**才从 DB 重建窗口
+- `backend/tests/test_memory_short_term_restore.py`：新增 3 项恢复幂等回归测试
+
+**为什么这么改**：
+- `initialize` 每请求执行，旧实现无条件把 DB 最近窗口**追加**进 store
+- 进程内 store 每次请求新建（空），追加合理；但 **Redis store 跨请求/跨 worker 持久**——每请求重复追加相同历史，窗口无限重复累积、顺序错乱（实测窗口变 `[hi, hello, hi, hello]`，真实场景下旧消息反复入窗、新消息排不到前面，并伴随多 worker 各自恢复加剧膨胀）
+
+**解决了什么问题**：
+- 持久化 store（Redis 生产模式）下短期记忆窗口不再重复累积、顺序保持正确
+- 多 uvicorn worker 场景下窗口内容一致（同一 DB 权威快照），避免各 worker 各自膨胀
+- 进程内 store（空）仍按原逻辑从 DB 恢复，本地/测试行为不变
+
+---
+
 ## 2026-09-02 检索质量改进（词法匹配增强）
 
-**提交**：待提交（本方向）
+**提交**：`d382810`
 
 **改了什么**：
 1. `backend/app/memory/retriever.py`：

@@ -7,7 +7,7 @@
 
 ## 2026-09-02 记忆检索归档过滤复合索引（迁移 0002）
 
-**提交**：待提交
+**提交**：`08e89bb`
 
 **改了什么**：
 - `backend/alembic/versions/0002_add_memory_archive_index.py`：新增迁移——在 `memory_entries` 建复合索引 `(user_id, archived_at, strength, updated_at)`

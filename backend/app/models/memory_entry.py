@@ -60,4 +60,11 @@ class MemoryEntry(Base):
             "ix_memory_user_archived_strength_updated",
             "user_id", "archived_at", "strength", "updated_at",
         ),
+        # 后台批量任务（Celery beat 衰减/过期归档）全量扫描：
+        #   WHERE archived_at IS NULL AND strength IS NOT NULL
+        # 不带 user_id 前缀，无法命中上述索引；此索引让批处理只扫活跃子集
+        Index(
+            "ix_memory_archived_strength_updated",
+            "archived_at", "strength", "updated_at",
+        ),
     )

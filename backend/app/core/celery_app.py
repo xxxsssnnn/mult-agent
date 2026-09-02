@@ -1,7 +1,12 @@
 """Celery 应用实例
 
 docker-compose 中 worker 命令为 `celery -A app.celery_app worker`，
-此文件即该入口。任务自动发现自 app.tasks 包。
+此文件即该入口。
+
+任务注册：celery_app 构造时 include 指定任务模块，
+worker/beat 启动即导入注册（autodiscover 只找 <pkg>.tasks 模块，
+无法发现 app.tasks.memory_tasks；若仅靠 API 进程内延迟 import，
+worker 冷启动将收到未注册的 memory.* 任务）。
 """
 from celery import Celery
 from app.core.config import settings
@@ -10,6 +15,7 @@ celery_app = Celery(
     "multi_agent",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
+    include=["app.tasks.memory_tasks"],
 )
 
 celery_app.conf.update(

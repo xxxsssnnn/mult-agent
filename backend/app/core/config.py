@@ -51,8 +51,6 @@ class Settings:
     MEMORY_CONSOLIDATION_BATCH_SIZE: int = int(os.getenv("MEMORY_CONSOLIDATION_BATCH_SIZE", "5"))
     # 持久化写入失败重试次数
     MEMORY_PERSISTENCE_RETRY: int = int(os.getenv("MEMORY_PERSISTENCE_RETRY", "3"))
-    # 是否启用记忆条目向量化（需配置向量后端）
-    MEMORY_VECTOR_ENABLED: bool = os.getenv("MEMORY_VECTOR_ENABLED", "False").lower() == "true"
     # 是否在上下文中注入相关记忆条目（跨会话混合检索）
     MEMORY_RETRIEVAL_ENABLED: bool = os.getenv("MEMORY_RETRIEVAL_ENABLED", "True").lower() == "true"
     # 上下文注入的相关记忆条数上限

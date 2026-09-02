@@ -259,10 +259,10 @@ class MemoryPersistence:
                 return
 
             # 更新metadata中的summary
-            if not conversation.metadata_:
-                conversation.metadata_ = {}
-
-            conversation.metadata_["summary"] = summary
+            # 注意：JSON 列不支持 in-place 修改跟踪，必须重建 dict 触发 dirty
+            meta = dict(conversation.metadata_ or {})
+            meta["summary"] = summary
+            conversation.metadata_ = meta
             conversation.updated_at = datetime.utcnow()
 
             await self.db.commit()
@@ -272,6 +272,49 @@ class MemoryPersistence:
         )
         logger.info("Summary saved to database", session_id=session_id, length=len(summary))
     
+    async def load_pending_consolidation(self, session_id: str) -> List[Dict]:
+        """加载待整合（consolidation）的消息批次。
+
+        MemoryManager 每请求重建，待整合批次跨请求持久化在会话
+        metadata_["pending_consolidation"]，避免跨请求场景下批次无法累积。
+        """
+        result = await self.db.execute(
+            select(Conversation).where(Conversation.session_id == session_id)
+        )
+        conversation = result.scalar_one_or_none()
+        if not conversation:
+            return []
+        meta = conversation.metadata_ or {}
+        pending = meta.get("pending_consolidation") or []
+        return [m for m in pending if isinstance(m, dict) and m.get("content")]
+
+    async def save_pending_consolidation(
+        self, session_id: str, pending: List[Dict]
+    ) -> None:
+        """持久化待整合的消息批次到会话 metadata_。"""
+
+        async def _do():
+            result = await self.db.execute(
+                select(Conversation).where(Conversation.session_id == session_id)
+            )
+            conversation = result.scalar_one_or_none()
+            if not conversation:
+                return
+            # JSON 列不支持 in-place 修改跟踪，必须重建 dict 触发 dirty
+            meta = dict(conversation.metadata_ or {})
+            meta["pending_consolidation"] = [
+                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                for m in pending
+                if m.get("content")
+            ]
+            conversation.metadata_ = meta
+            conversation.updated_at = datetime.utcnow()
+            await self.db.commit()
+
+        await self._run_with_retry(
+            "save_pending_consolidation", _do, session_id=session_id
+        )
+
     async def delete_conversation(self, session_id: str) -> bool:
         """
         删除会话及其所有消息

@@ -117,6 +117,25 @@ class MemoryManager:
                     await self.long_term.set_summary(simple_summary)
                     await self.persistence.save_summary(self.session_id, simple_summary)
             
+            # 恢复待整合的消息批次（跨请求持续累积，达到批大小即触发）
+            try:
+                pending = await self.persistence.load_pending_consolidation(
+                    self.session_id
+                )
+                if pending:
+                    self._consolidation_pending = pending
+                    logger.info(
+                        "Restored pending consolidation batch",
+                        session_id=self.session_id,
+                        pending=len(pending),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to restore pending consolidation",
+                    error=str(e),
+                    session_id=self.session_id,
+                )
+
             self.is_initialized = True
             logger.info("MemoryManager initialized successfully")
             
@@ -176,14 +195,37 @@ class MemoryManager:
                     role=role,
                 )
 
-        # 触发异步 consolidation（批量达到阈值或有消息被驱逐时）
-        if (
+        # 触发异步 consolidation（批量达到阈值或有消息被驱逐时）。
+        # 批次持久化在会话 metadata_，跨请求累积；未达阈值时写回，达到阈值时清空。
+        should_trigger = (
             settings.MEMORY_CONSOLIDATION_ENABLED
-            and len(self._consolidation_pending) >= settings.MEMORY_CONSOLIDATION_BATCH_SIZE
-        ) or evicted_messages:
+            and len(self._consolidation_pending)
+            >= settings.MEMORY_CONSOLIDATION_BATCH_SIZE
+        ) or evicted_messages
+        if should_trigger:
             batch = list(self._consolidation_pending)
             self._consolidation_pending.clear()
+            if self.persistence:
+                try:
+                    await self.persistence.save_pending_consolidation(
+                        self.session_id, self._consolidation_pending
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to clear pending consolidation",
+                        session_id=self.session_id,
+                    )
             await self._trigger_consolidation(batch)
+        elif self.persistence:
+            try:
+                await self.persistence.save_pending_consolidation(
+                    self.session_id, self._consolidation_pending
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist pending consolidation",
+                    session_id=self.session_id,
+                )
 
         logger.debug(
             "Message added to memory",

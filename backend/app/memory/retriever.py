@@ -85,30 +85,21 @@ class MemoryRetriever:
             记忆字典列表，含 score 排序字段
         """
         user_id = normalize_user_id(user_id)
-        stmt = select(MemoryEntry).where(
+        where_conds = [
             MemoryEntry.archived_at.is_(None),
             or_(
                 MemoryEntry.expires_at.is_(None),
                 MemoryEntry.expires_at > datetime.utcnow(),
             ),
-        )
+        ]
         if user_id is not None:
-            stmt = stmt.where(MemoryEntry.user_id == user_id)
+            where_conds.append(MemoryEntry.user_id == user_id)
         else:
-            stmt = stmt.where(MemoryEntry.user_id.is_(None))
+            where_conds.append(MemoryEntry.user_id.is_(None))
         if session_id:
-            stmt = stmt.where(MemoryEntry.session_id == session_id)
+            where_conds.append(MemoryEntry.session_id == session_id)
         if memory_type:
-            stmt = stmt.where(MemoryEntry.memory_type == memory_type)
-
-        result = await session.execute(stmt)
-        candidates = result.scalars().all()
-
-        # 惰性衰减：检索时顺带对候选记忆应用时间衰减（无需定时任务）
-        if settings.MEMORY_DECAY_ENABLED:
-            from app.memory.decay import apply_decay
-            for m in candidates:
-                apply_decay(m)
+            where_conds.append(MemoryEntry.memory_type == memory_type)
 
         # 向量语义命中（不可用/失败时自动降级为空）
         vector_hits: Dict[str, float] = {}
@@ -121,6 +112,31 @@ class MemoryRetriever:
                 vector_hits = {str(k): v for k, v in (hits or [])}
             except Exception:  # noqa: BLE001
                 vector_hits = {}
+
+        # 候选获取（规模保护）：先按强度取前 N，向量命中的条目额外召回
+        stmt = (
+            select(MemoryEntry)
+            .where(*where_conds)
+            .order_by(MemoryEntry.strength.desc())
+            .limit(settings.MEMORY_RETRIEVAL_CANDIDATE_LIMIT)
+        )
+        result = await session.execute(stmt)
+        candidates = list(result.scalars().all())
+        known_ids = {str(m.id) for m in candidates}
+        extra_ids = [i for i in vector_hits if i not in known_ids]
+        if extra_ids:
+            extra = await session.execute(
+                select(MemoryEntry).where(
+                    MemoryEntry.id.in_(extra_ids), *where_conds
+                )
+            )
+            candidates.extend(extra.scalars().all())
+
+        # 惰性衰减：检索时顺带对候选记忆应用时间衰减（无需定时任务）
+        if settings.MEMORY_DECAY_ENABLED:
+            from app.memory.decay import apply_decay
+            for m in candidates:
+                apply_decay(m)
 
         tokens = _tokenize(query or "")
         scored = []

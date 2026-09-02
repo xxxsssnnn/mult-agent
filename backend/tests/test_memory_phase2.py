@@ -21,6 +21,7 @@ from app.memory.extractor import MemoryExtractor
 from app.memory.updater import _content_similar, apply_memory_updates
 from app.memory.retriever import MemoryRetriever, _freshness, _relevance, _tokenize
 from app.memory.decay import apply_decay, decay_memories
+from app.memory.consolidation import trim_event_entries
 from app.memory.vector_store import memory_vector_store
 from app.models.memory_entry import MemoryEntry
 
@@ -64,15 +65,31 @@ class FakeResult:
 
 
 class FakeSession:
-    """模拟 AsyncSession：execute 返回预设结果，add 记录新增对象"""
+    """模拟 AsyncSession：execute 返回预设结果，add 记录新增对象
 
-    def __init__(self, rows=None):
+    - rows: 所有 execute 统一返回
+    - rows_sequence: 按 execute 调用顺序依次返回（不足时重复最后一次）
+    """
+
+    def __init__(self, rows=None, rows_sequence=None):
         self.rows = rows or []
+        self.rows_sequence = rows_sequence or []
+        self._call = 0
         self.added = []
 
     async def execute(self, stmt):
         # 有 update 类语句（检索命中统计）时无需特殊处理
+        if self.rows_sequence:
+            idx = min(self._call, len(self.rows_sequence) - 1)
+            self._call += 1
+            return FakeResult(self.rows_sequence[idx])
         return FakeResult(self.rows)
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):
+        pass
 
     def add(self, obj):
         self.added.append(obj)
@@ -266,6 +283,51 @@ def test_retriever_vector_degrades_gracefully():
     check("向量不可用时检索仍返回结果", len(results) == 2)
 
 
+def test_retriever_vector_recalls_extra_candidates():
+    """候选集之外的向量命中条目（即使强度低）应被额外召回"""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    strong = make_entry("高强度记忆", strength=0.9)
+    low = make_entry("向量命中但强度低", strength=0.05)
+    session = FakeSession(rows_sequence=[[strong], [low]])
+    fake = SimpleNamespace(
+        _available=True,
+        search=lambda query, top_k=10, user_id=None: [(str(low.id), 0.9)],
+        index_entries=lambda entries: 0,
+        remove_entries=lambda ids: 0,
+    )
+    with patch("app.memory.vector_store.memory_vector_store", fake):
+        results = run(
+            MemoryRetriever(top_k=10).retrieve(
+                session, None, query="语义相关", limit=5
+            )
+        )
+    ids = {r["id"] for r in results}
+    check("候选集之外的向量命中条目被召回", str(low.id) in ids)
+
+
+def test_trim_event_entries_archives_oldest():
+    """超出上限的会话 event 记忆被归档（保留最近 max_count 条）"""
+    now = datetime.utcnow()
+    events = [
+        make_entry(
+            f"事件 {i}",
+            memory_type="event",
+            updated_at=now - timedelta(minutes=i),
+        )
+        for i in range(3)
+    ]
+    # 模拟 SQL：order by updated_at desc offset 1 -> 仅返回最旧的 2 条
+    session = FakeSession(rows=events[1:])
+    archived = run(trim_event_entries(session, "s1", max_count=1))
+    check("超出上限的 event 被归档", archived == 2)
+    check(
+        "最旧事件已标记归档",
+        events[1].archived_at is not None and events[2].archived_at is not None,
+    )
+
+
 # ---------- 衰减与遗忘 ----------
 
 def test_decay_fresh_memory_barely_decays():
@@ -322,6 +384,8 @@ def main():
         test_retriever_pagination_offset,
         test_retriever_vector_boost,
         test_retriever_vector_degrades_gracefully,
+        test_retriever_vector_recalls_extra_candidates,
+        test_trim_event_entries_archives_oldest,
         test_decay_fresh_memory_barely_decays,
         test_decay_old_memory_decays,
         test_decay_frequently_accessed_decays_slower,

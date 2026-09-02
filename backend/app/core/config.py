@@ -67,6 +67,10 @@ class Settings:
     MEMORY_DECAY_INTERVAL_SECONDS: int = int(os.getenv("MEMORY_DECAY_INTERVAL_SECONDS", "21600"))
     # 向量语义检索（基于 ChromaDB，懒加载，不可用自动降级）
     MEMORY_VECTOR_ENABLED: bool = os.getenv("MEMORY_VECTOR_ENABLED", "True").lower() == "true"
+    # 检索候选集规模上限（先按强度取前 N，向量命中的条目额外召回）
+    MEMORY_RETRIEVAL_CANDIDATE_LIMIT: int = int(os.getenv("MEMORY_RETRIEVAL_CANDIDATE_LIMIT", "500"))
+    # 单个会话 event 记忆保留上限（超出部分归档，防膨胀）
+    MEMORY_EVENT_MAX_PER_SESSION: int = int(os.getenv("MEMORY_EVENT_MAX_PER_SESSION", "100"))
 
 
 settings = Settings()

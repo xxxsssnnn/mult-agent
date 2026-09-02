@@ -11,6 +11,7 @@
 使用独立的 NullPool 数据库引擎，避免不同 event loop 之间共享连接池。
 """
 import structlog
+from datetime import datetime
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -74,6 +75,40 @@ async def save_event_entries(session, session_id: str, user_id, messages: list) 
         session.add(entry)
         entries.append(entry)
     return entries
+
+
+async def trim_event_entries(
+    session,
+    session_id: str,
+    max_count: int,
+) -> int:
+    """归档超出上限的会话 event 记忆条目（按更新时间倒序保留最近 max_count 条）"""
+    if max_count <= 0:
+        return 0
+    stmt = (
+        select(MemoryEntry)
+        .where(
+            MemoryEntry.session_id == session_id,
+            MemoryEntry.memory_type == "event",
+            MemoryEntry.archived_at.is_(None),
+        )
+        .order_by(MemoryEntry.updated_at.desc())
+        .offset(max_count)
+    )
+    result = await session.execute(stmt)
+    extra = list(result.scalars().all())
+    now = datetime.utcnow()
+    for entry in extra:
+        entry.archived_at = now
+        entry.updated_at = now
+    if extra:
+        logger.info(
+            "memory.event.trimmed",
+            session_id=session_id,
+            archived=len(extra),
+            max_count=max_count,
+        )
+    return len(extra)
 
 
 async def _extract_and_apply(session, user_id, session_id, messages: list) -> list:
@@ -152,8 +187,11 @@ async def consolidate_memory(
         meta["summary"] = new_summary
         conv.metadata_ = meta
 
-        # 4. 事件记忆条目入库（溯源/审计）
+        # 4. 事件记忆条目入库（溯源/审计），并控制单会话规模
         await save_event_entries(session, session_id, user_id, messages)
+        await trim_event_entries(
+            session, session_id, settings.MEMORY_EVENT_MAX_PER_SESSION
+        )
 
         # 5. 提取结构化记忆（fact/preference/procedural）并按更新策略入库
         extracted = await _extract_and_apply(session, user_id, session_id, messages)

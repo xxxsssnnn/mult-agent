@@ -1,5 +1,11 @@
-"""记忆持久化模块 - 负责记忆的数据库存储和加载"""
+"""记忆持久化模块 - 负责记忆的数据库存储和加载
 
+企业级改造（Phase 1）:
+- 写入操作带重试（失败退避重试，避免瞬时故障导致数据丢失）
+- 失败不静默：重试耗尽后抛出异常并记录 error 日志（含操作上下文）
+"""
+
+import asyncio
 from typing import List, Dict, Optional
 from uuid import UUID
 from datetime import datetime
@@ -8,7 +14,7 @@ from sqlalchemy import select
 import structlog
 
 from app.models.conversation import Conversation, Message
-from app.core.database import get_db
+from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -29,6 +35,41 @@ class MemoryPersistence:
         """
         self.db = db_session
         logger.info("Memory persistence initialized")
+
+    async def _run_with_retry(self, operation_name: str, coro_factory, **log_ctx):
+        """执行写入操作并带重试。
+
+        Args:
+            operation_name: 操作名（用于日志）
+            coro_factory: 无参协程工厂（每次尝试重新执行）
+            **log_ctx: 日志上下文（如 session_id）
+        """
+        max_retries = max(1, settings.MEMORY_PERSISTENCE_RETRY)
+        for attempt in range(1, max_retries + 1):
+            try:
+                return await coro_factory()
+            except Exception as exc:
+                await self.db.rollback()
+                if attempt < max_retries:
+                    delay = 0.2 * attempt  # 简单线性退避
+                    logger.warning(
+                        "persistence.retry",
+                        operation=operation_name,
+                        attempt=attempt,
+                        max_retries=max_retries,
+                        retry_delay_s=delay,
+                        error=str(exc),
+                        **log_ctx,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.exception(
+                        "persistence.failed",
+                        operation=operation_name,
+                        retries_exhausted=True,
+                        **log_ctx,
+                    )
+                    raise
     
     async def save_conversation(self, session_id: str, user_id: Optional[UUID] = None, 
                                title: Optional[str] = None) -> UUID:
@@ -43,33 +84,37 @@ class MemoryPersistence:
         Returns:
             会话的UUID
         """
-        # 检查会话是否已存在
-        result = await self.db.execute(
-            select(Conversation).where(Conversation.session_id == session_id)
-        )
-        conversation = result.scalar_one_or_none()
-        
-        if conversation:
-            # 更新现有会话
-            if title:
-                conversation.title = title
-            conversation.updated_at = datetime.utcnow()
-            logger.info("Conversation updated", session_id=session_id)
-        else:
-            # 创建新会话
-            conversation = Conversation(
-                session_id=session_id,
-                user_id=user_id,
-                title=title or f"Conversation {session_id[:8]}",
-                metadata_={}
+        async def _do():
+            # 检查会话是否已存在
+            result = await self.db.execute(
+                select(Conversation).where(Conversation.session_id == session_id)
             )
-            self.db.add(conversation)
-            logger.info("Conversation created", session_id=session_id)
-        
-        await self.db.commit()
-        await self.db.refresh(conversation)
-        
-        return conversation.id
+            conversation = result.scalar_one_or_none()
+
+            if conversation:
+                # 更新现有会话
+                if title:
+                    conversation.title = title
+                conversation.updated_at = datetime.utcnow()
+                logger.info("Conversation updated", session_id=session_id)
+            else:
+                # 创建新会话
+                conversation = Conversation(
+                    session_id=session_id,
+                    user_id=user_id,
+                    title=title or f"Conversation {session_id[:8]}",
+                    metadata_={},
+                )
+                self.db.add(conversation)
+                logger.info("Conversation created", session_id=session_id)
+
+            await self.db.commit()
+            await self.db.refresh(conversation)
+            return conversation.id
+
+        return await self._run_with_retry(
+            "save_conversation", _do, session_id=session_id
+        )
     
     async def save_message(self, conversation_id: UUID, role: str, content: str,
                           tool_calls: Optional[Dict] = None, 
@@ -87,26 +132,32 @@ class MemoryPersistence:
         Returns:
             消息的UUID
         """
-        message = Message(
-            conversation_id=conversation_id,
-            role=role,
-            content=content,
-            tool_calls=tool_calls,
-            metadata_=metadata_ or {}
+        async def _do():
+            message = Message(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                tool_calls=tool_calls,
+                metadata_=metadata_ or {},
+            )
+
+            self.db.add(message)
+            await self.db.commit()
+            await self.db.refresh(message)
+            return message.id
+
+        message_id = await self._run_with_retry(
+            "save_message", _do, conversation_id=str(conversation_id)
         )
-        
-        self.db.add(message)
-        await self.db.commit()
-        await self.db.refresh(message)
-        
+
         logger.debug(
             "Message saved to database",
             conversation_id=str(conversation_id),
             role=role,
-            content_length=len(content)
+            content_length=len(content),
         )
-        
-        return message.id
+
+        return message_id
     
     async def load_messages(self, session_id: str, limit: Optional[int] = None) -> List[Dict]:
         """
@@ -194,24 +245,31 @@ class MemoryPersistence:
             session_id: 会话ID
             summary: 摘要内容
         """
-        result = await self.db.execute(
-            select(Conversation).where(Conversation.session_id == session_id)
+        async def _do():
+            result = await self.db.execute(
+                select(Conversation).where(Conversation.session_id == session_id)
+            )
+            conversation = result.scalar_one_or_none()
+
+            if not conversation:
+                logger.warning(
+                    "Conversation not found for saving summary",
+                    session_id=session_id,
+                )
+                return
+
+            # 更新metadata中的summary
+            if not conversation.metadata_:
+                conversation.metadata_ = {}
+
+            conversation.metadata_["summary"] = summary
+            conversation.updated_at = datetime.utcnow()
+
+            await self.db.commit()
+
+        await self._run_with_retry(
+            "save_summary", _do, session_id=session_id
         )
-        conversation = result.scalar_one_or_none()
-        
-        if not conversation:
-            logger.warning("Conversation not found for saving summary", session_id=session_id)
-            return
-        
-        # 更新metadata中的summary
-        if not conversation.metadata_:
-            conversation.metadata_ = {}
-        
-        conversation.metadata_["summary"] = summary
-        conversation.updated_at = datetime.utcnow()
-        
-        await self.db.commit()
-        
         logger.info("Summary saved to database", session_id=session_id, length=len(summary))
     
     async def delete_conversation(self, session_id: str) -> bool:
@@ -224,26 +282,35 @@ class MemoryPersistence:
         Returns:
             是否成功删除
         """
-        result = await self.db.execute(
-            select(Conversation).where(Conversation.session_id == session_id)
+        async def _do():
+            result = await self.db.execute(
+                select(Conversation).where(Conversation.session_id == session_id)
+            )
+            conversation = result.scalar_one_or_none()
+
+            if not conversation:
+                logger.warning(
+                    "Conversation not found for deletion", session_id=session_id
+                )
+                return False
+
+            # 删除相关消息
+            await self.db.execute(
+                Message.__table__.delete().where(
+                    Message.conversation_id == conversation.id
+                )
+            )
+
+            # 删除会话
+            await self.db.delete(conversation)
+            await self.db.commit()
+            return True
+
+        deleted = await self._run_with_retry(
+            "delete_conversation", _do, session_id=session_id
         )
-        conversation = result.scalar_one_or_none()
-        
-        if not conversation:
-            logger.warning("Conversation not found for deletion", session_id=session_id)
-            return False
-        
-        # 删除相关消息
-        await self.db.execute(
-            Message.__table__.delete().where(Message.conversation_id == conversation.id)
-        )
-        
-        # 删除会话
-        await self.db.delete(conversation)
-        await self.db.commit()
-        
         logger.info("Conversation deleted", session_id=session_id)
-        return True
+        return deleted
     
     async def get_conversation_stats(self, session_id: str) -> Dict:
         """

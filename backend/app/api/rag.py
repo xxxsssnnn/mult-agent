@@ -1,6 +1,6 @@
 """RAG API端点"""
 
-from typing import List, Optional, Dict, Any, UploadFile, File
+from typing import List, Optional, Dict, Any
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import JSONResponse

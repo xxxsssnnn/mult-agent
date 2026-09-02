@@ -40,5 +40,19 @@ class Settings:
     MEMORY_LONG_TERM_MAX_SUMMARY_LENGTH: int = int(os.getenv("MEMORY_LONG_TERM_MAX_SUMMARY_LENGTH", "500"))
     MEMORY_PERSISTENCE_ENABLED: bool = os.getenv("MEMORY_PERSISTENCE_ENABLED", "True").lower() == "true"
 
+    # --- Enterprise memory (Phase 1) ---
+    # 短期记忆存储后端: auto(优先Redis,失败降级内存) / redis / memory
+    MEMORY_SHORT_TERM_STORE: str = os.getenv("MEMORY_SHORT_TERM_STORE", "auto")
+    # 短期记忆 Redis 键 TTL（秒）
+    MEMORY_SHORT_TERM_TTL: int = int(os.getenv("MEMORY_SHORT_TERM_TTL", "7200"))
+    # 是否启用异步 consolidation（记忆提取/摘要）
+    MEMORY_CONSOLIDATION_ENABLED: bool = os.getenv("MEMORY_CONSOLIDATION_ENABLED", "True").lower() == "true"
+    # consolidation 每批处理的消息数
+    MEMORY_CONSOLIDATION_BATCH_SIZE: int = int(os.getenv("MEMORY_CONSOLIDATION_BATCH_SIZE", "5"))
+    # 持久化写入失败重试次数
+    MEMORY_PERSISTENCE_RETRY: int = int(os.getenv("MEMORY_PERSISTENCE_RETRY", "3"))
+    # 是否启用记忆条目向量化（Phase 2, 需配置向量后端）
+    MEMORY_VECTOR_ENABLED: bool = os.getenv("MEMORY_VECTOR_ENABLED", "False").lower() == "true"
+
 
 settings = Settings()

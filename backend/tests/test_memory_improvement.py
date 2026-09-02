@@ -56,7 +56,7 @@ async def test_no_semantic_loss():
     print("开始添加对话...\n")
     for i, (role, content) in enumerate(conversations, 1):
         await memory.add_message(role, content)
-        short_count = memory.short_term.get_message_count()
+        short_count = await memory.short_term.get_message_count()
         print(f"第{i}条消息 ({role}): {content[:40]}...")
         print(f"  → 短期记忆中的消息数: {short_count}")
         
@@ -157,7 +157,7 @@ async def test_window_overflow_detection():
         
         evicted = await memory.short_term.add_message(role, content)
         
-        short_count = memory.short_term.get_message_count()
+        short_count = await memory.short_term.get_message_count()
         print(f"添加消息 {i} ({role})")
         print(f"  → 短期记忆: {short_count} 条消息")
         print(f"  → 被移出: {len(evicted)} 条消息")

@@ -35,9 +35,13 @@ class MemoryManager:
         self.user_id = user_id
         self.db_session = db_session
         
-        # 初始化短期记忆
+        # 初始化短期记忆（默认内存后端，initialize 时按配置升级为 Redis）
         window_size = getattr(settings, 'MEMORY_SHORT_TERM_WINDOW_SIZE', 5)
-        self.short_term = ShortTermMemory(window_size=window_size)
+        self.short_term = ShortTermMemory(
+            window_size=window_size,
+            namespace="session",
+            session_id=session_id,
+        )
         
         # 初始化长期记忆
         max_summary_length = getattr(settings, 'MEMORY_LONG_TERM_MAX_SUMMARY_LENGTH', 500)
@@ -46,13 +50,18 @@ class MemoryManager:
         # 初始化持久化层（如果提供了db_session）
         self.persistence = MemoryPersistence(db_session) if db_session else None
         
+        # 待整合（consolidation）的消息批次，达到阈值后异步处理
+        self._consolidation_pending: List[Dict] = []
+        # Redis 可用时走 Celery 异步；不可用时（本地开发）内联降级
+        self._use_celery = False
         self.is_initialized = False
         
         logger.info(
             "MemoryManager initialized",
             session_id=session_id,
             short_term_window=window_size,
-            persistence_enabled=self.persistence is not None
+            persistence_enabled=self.persistence is not None,
+            consolidation_enabled=settings.MEMORY_CONSOLIDATION_ENABLED,
         )
     
     async def initialize(self) -> None:
@@ -64,6 +73,14 @@ class MemoryManager:
         2. 将最近的消息加载到短期记忆
         3. 将摘要加载到长期记忆
         """
+        # 按配置初始化短期记忆存储后端（auto 模式：Redis 不可用自动降级内存）
+        from app.memory.stores import create_memory_store
+        from app.memory.stores.redis_store import RedisMemoryStore
+        store = await create_memory_store()
+        await self.short_term.set_store(store)
+        # 仅当 Redis 真正可用时才使用 Celery 异步（避免本地无 broker 时任务静默丢失）
+        self._use_celery = isinstance(store, RedisMemoryStore)
+
         if not self.persistence:
             logger.warning("No persistence layer, skipping initialization")
             self.is_initialized = True
@@ -119,60 +136,101 @@ class MemoryManager:
         """
         # 添加到短期记忆，并获取被移出的消息
         evicted_messages = await self.short_term.add_message(role, content)
-        
-        # 如果有消息被移出短期窗口，处理它们（转移到长期记忆）
-        if evicted_messages:
-            logger.info(
-                "Processing evicted messages from short-term window",
-                count=len(evicted_messages)
-            )
-            # 将被移出的消息添加到长期记忆进行摘要和保存
-            for msg in evicted_messages:
-                msg_role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                await self.long_term.add_message(msg_role, msg.content)
-        
-        # 同时将所有消息添加到长期记忆（用于生成摘要）
+
+        # 记录待整合的消息（新消息 + 被驱逐消息），供异步 consolidation 处理
+        self._consolidation_pending.append({"role": role, "content": content})
+        for msg in evicted_messages:
+            msg_role = "user" if isinstance(msg, HumanMessage) else "assistant"
+            self._consolidation_pending.append({"role": msg_role, "content": msg.content})
+
+        # 同步更新长期摘要（保留既有行为；LLM 摘要开销将随 P2 迁移至异步）
         await self.long_term.add_message(role, content)
-        
-        # 持久化到数据库
+
+        # 持久化到数据库（persistence 内部带重试，失败告警但不中断主流程）
         if self.persistence:
             try:
-                # 确保会话存在
                 conversation_id = await self.persistence.save_conversation(
                     self.session_id,
                     self.user_id
                 )
-                
-                # 保存消息
                 await self.persistence.save_message(
                     conversation_id,
                     role,
                     content,
                     metadata_=metadata
                 )
-                
-                # 定期更新摘要
+
+                # 定期同步摘要落库（consolidation 管道也会异步更新）
                 summary_interval = getattr(settings, 'MEMORY_LONG_TERM_SUMMARY_INTERVAL', 10)
                 stats = await self.persistence.get_conversation_stats(self.session_id)
-                
                 if stats.get("total_messages", 0) % summary_interval == 0:
                     current_summary = await self.long_term.get_summary()
                     if current_summary:
                         await self.persistence.save_summary(self.session_id, current_summary)
                         logger.info("Updated summary in database")
-                
             except Exception as e:
-                logger.error("Failed to persist message", error=str(e))
-                # 不抛出异常，避免影响主流程
-        
+                logger.error(
+                    "Failed to persist message",
+                    error=str(e),
+                    session_id=self.session_id,
+                    role=role,
+                )
+
+        # 触发异步 consolidation（批量达到阈值或有消息被驱逐时）
+        if (
+            settings.MEMORY_CONSOLIDATION_ENABLED
+            and len(self._consolidation_pending) >= settings.MEMORY_CONSOLIDATION_BATCH_SIZE
+        ) or evicted_messages:
+            batch = list(self._consolidation_pending)
+            self._consolidation_pending.clear()
+            await self._trigger_consolidation(batch)
+
         logger.debug(
             "Message added to memory",
             role=role,
             content_length=len(content),
-            short_term_count=self.short_term.get_message_count(),
+            short_term_count=await self.short_term.get_message_count(),
             evicted_count=len(evicted_messages)
         )
-    
+
+    async def _trigger_consolidation(self, messages: List[Dict]) -> None:
+        """触发异步记忆整合（Redis 可用时走 Celery，否则内联降级）"""
+        if not self._use_celery:
+            await self._consolidate_inline(messages)
+            return
+
+        try:
+            from app.tasks.memory_tasks import consolidate_memory_task
+            consolidate_memory_task.delay(
+                self.session_id,
+                str(self.user_id) if self.user_id else None,
+                messages,
+            )
+            logger.info(
+                "memory.consolidation.queued",
+                session_id=self.session_id,
+                messages=len(messages),
+            )
+        except Exception as exc:
+            # 投递异常（如 broker 连接问题）：内联降级执行
+            logger.warning(
+                "memory.consolidation.fallback_inline",
+                session_id=self.session_id,
+                error=str(exc),
+            )
+            await self._consolidate_inline(messages)
+
+    async def _consolidate_inline(self, messages: List[Dict]) -> None:
+        """内联执行记忆整合（API 进程内，供本地/降级场景）"""
+        try:
+            from app.memory.consolidation import consolidate_memory
+            await consolidate_memory(self.session_id, self.user_id, messages)
+        except Exception:
+            logger.exception(
+                "memory.consolidation.inline_failed",
+                session_id=self.session_id,
+            )
+
     async def get_context(self) -> str:
         """
         获取完整的记忆上下文（短期+长期）
@@ -240,7 +298,13 @@ class MemoryManager:
             summary = await self.long_term.get_summary()
             if summary:
                 await self.persistence.save_summary(self.session_id, summary)
-            
+
+            # 会话结束时清空并整合剩余待处理消息
+            if self._consolidation_pending:
+                batch = list(self._consolidation_pending)
+                self._consolidation_pending.clear()
+                await self._trigger_consolidation(batch)
+
             logger.info("Memory saved to database")
             
         except Exception as e:
@@ -266,9 +330,10 @@ class MemoryManager:
         """
         stats = {
             "session_id": self.session_id,
-            "short_term_message_count": self.short_term.get_message_count(),
+            "short_term_message_count": await self.short_term.get_message_count(),
             "long_term_has_summary": self.long_term.has_summary(),
-            "is_initialized": self.is_initialized
+            "is_initialized": self.is_initialized,
+            "consolidation_pending": len(self._consolidation_pending),
         }
         
         if self.persistence:

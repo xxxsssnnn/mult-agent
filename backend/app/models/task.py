@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import Column, String, Text, Integer, DateTime, JSON, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from app.core.database import Base
 
 
@@ -27,4 +27,9 @@ class Task(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     agent = relationship("Agent", back_populates="tasks")
-    subtasks = relationship("Task", backref="parent_task")
+    # 自引用关系：parent_task 为多对一方向（remote_side 必须在父端）
+    subtasks = relationship(
+        "Task",
+        backref=backref("parent_task", remote_side="Task.id"),
+        foreign_keys="Task.parent_task_id",
+    )

@@ -74,7 +74,9 @@ async def health_check():
 async def startup_event():
     """应用启动时执行"""
     logger.info("Application starting up")
-    # 这里可以初始化数据库连接、注册Agent等
+    # 建表兜底（生产环境建议使用 alembic 迁移）
+    from app.core.database import init_db
+    await init_db()
 
 
 @app.on_event("shutdown")

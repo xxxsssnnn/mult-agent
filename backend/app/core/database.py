@@ -40,3 +40,22 @@ async def get_db():
             raise
         finally:
             await session.close()
+
+
+async def init_db() -> None:
+    """启动建表兜底：自动创建缺失的表（幂等）。
+
+    生产环境推荐使用 alembic 迁移（backend/alembic），此处作为兜底保证
+    本地开发与测试环境开箱即用。已存在的表不会被修改。
+    """
+    import structlog
+    logger = structlog.get_logger(__name__)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("database.init_db.completed")
+    except Exception:
+        logger.exception(
+            "database.init_db.failed",
+            hint="若为 SQLite + PostgreSQL UUID 方言兼容问题，请使用 PostgreSQL 或执行 alembic 迁移",
+        )

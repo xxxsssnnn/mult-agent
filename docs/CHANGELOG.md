@@ -5,6 +5,45 @@
 
 ---
 
+## 2026-09-02 Celery worker 启动注册 memory 任务（接线修复）
+
+**提交**：`791de3c`
+
+**改了什么**：
+- `backend/app/core/celery_app.py`：`Celery(...)` 构造函数新增 `include=["app.tasks.memory_tasks"]`，worker/beat 进程启动即导入注册 `memory.consolidate` 与 `memory.decay_memories`
+- 新增 `backend/tests/test_celery_registration.py`（9 项断言）：模拟 worker 启动路径（`loader.import_default_modules()`）后任务已注册、beat_schedule 指向已注册任务且周期与 `MEMORY_DECAY_INTERVAL_SECONDS` 一致、decay 任务可靠性属性（`acks_late` / retry）不回退
+- `run_tests.ps1`：纳入新套件
+
+**为什么这么改**：
+- `autodiscover_tasks(["app.tasks"])` 实际查找的是 `app.tasks.tasks` 模块（不存在）；任务真正定义在 `app/tasks/memory_tasks.py`
+- 此前该模块仅被 API 进程内的 `manager.py` 延迟 import（运行期触发），**worker 进程冷启动时从未 import 过它**——`memory.*` 任务在 worker 端未注册，beat 每 6 小时投递的 `memory.decay_memories` 会因 "Received unregistered task" 永远无法执行
+
+**解决了什么问题**：
+- 定时衰减/过期归档从"代码正确但无人调度执行"变为真正可运行：beat 投递 → worker 已注册 → 执行
+- 冷启动场景下 consolidation 任务同样受惠（不再依赖 API 进程恰好先触发过 import）
+- 回归测试用 worker 视角固化接线，防止未来 autodiscover/include 配置回退
+
+---
+
+## 2026-09-02 后台批量扫描索引（迁移 0003）
+
+**提交**：`35a5c5b`
+
+**改了什么**：
+- `backend/app/models/memory_entry.py`：`__table_args__` 新增复合索引 `ix_memory_archived_strength_updated (archived_at, strength, updated_at)`
+- 新增迁移 `backend/alembic/versions/0003_add_memory_decay_scan_index.py`
+- `backend/tests/test_migrations.py`：head 断言推进到 `0003`，新增后台批量扫描索引存在性检查
+
+**为什么这么改**：
+- 后台批量任务（定时衰减 + 合规过期归档）的扫描查询是 `WHERE archived_at IS NULL AND strength IS NOT NULL`，**不带 user_id 前缀**
+- 现有索引全部以 `user_id` 开头（检索路径专用），批处理无法命中，只能全表扫描；归档条目随业务增长后成本线性上升
+
+**解决了什么问题**：
+- 批处理只需扫描活跃子集（`archived_at IS NULL` 前缀定位），归档数据越多收益越明显
+- 与方向"批量衰减任务归档合规过期记忆"（`5d7fe2c`）配套：过期清理真正落库后，索引保证清扫本身高效
+
+---
+
 ## 2026-09-02 批量衰减任务归档合规过期记忆
 
 **提交**：`5d7fe2c`

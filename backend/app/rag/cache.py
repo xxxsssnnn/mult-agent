@@ -58,8 +58,15 @@ class SemanticCache:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def make_key(user_id, query: str, k: int, search_type: str) -> str:
-        raw = f"{user_id}|{search_type}|{k}|{query.strip()}"
+    def make_key(
+        user_id,
+        query: str,
+        k: int,
+        search_type: str,
+        extra: str = "",
+    ) -> str:
+        """缓存键。extra 用于区分影响答案内容的管道差异（如是否经重排）。"""
+        raw = f"{user_id}|{search_type}|{k}|{extra}|{query.strip()}"
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------ #

@@ -403,9 +403,16 @@ async def get_rag_info(
                     else None
                 ),
                 "vector_store": "ChromaDB (tenant-aware)",
-                "retriever": "Semantic Retriever (similarity / score / mmr)",
+                "retriever": "Semantic Retriever (hybrid / similarity / score / mmr)",
+                "reranker": f"LLM two-stage reranker (enabled={rag_agent.rerank_enabled})",
                 "llm": "OpenAI GPT (if configured)",
                 "document_registry": "SQLAlchemy RAGDocument (persistence + idempotency)",
+            },
+            "reranking": {
+                "enabled": rag_agent.rerank_enabled,
+                "candidate_multiplier": rag_agent.rerank_candidate_multiplier,
+                "max_candidates": rag_agent.rerank_max_candidates,
+                "note": "Stage-2 LLM pointwise scoring; effective when LLM is configured.",
             },
             "capabilities": rag_agent.get_capabilities(),
             "supported_file_types": settings.RAG_ALLOWED_EXTENSIONS,

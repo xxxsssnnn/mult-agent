@@ -20,6 +20,7 @@ from app.agents.base import BaseAgent
 from app.core.config import settings
 from app.rag.cache import SemanticCache
 from app.rag.document_processor import DocumentProcessor
+from app.rag.reranker import LLMReranker
 from app.rag.embedding_service import EmbeddingService
 from app.rag.exceptions import (
     DocumentNotFoundError,
@@ -72,12 +73,28 @@ class RAGAgent(BaseAgent):
             max_entries_per_user=settings.RAG_CACHE_MAX_ENTRIES_PER_USER,
         )
 
+        # 两阶段重排：先放大召回，再 LLM 点级打分截断到 top-k。
+        # 开关默认开，但仅当装配了 LLM 时才会真正生效（见 LLMReranker.active）
+        self.rerank_enabled = config.get("rerank_enabled", settings.RAG_RERANK_ENABLED)
+        self.rerank_candidate_multiplier = config.get(
+            "rerank_candidate_multiplier", settings.RAG_RERANK_CANDIDATE_MULTIPLIER
+        )
+        self.rerank_max_candidates = config.get(
+            "rerank_max_candidates", settings.RAG_RERANK_MAX_CANDIDATES
+        )
+        self.reranker: Optional[LLMReranker] = LLMReranker(
+            llm=None,
+            enabled=self.rerank_enabled,
+            max_doc_chars=settings.RAG_RERANK_MAX_DOC_CHARS,
+        )
+
         logger.info(
             "RAGAgent initialized",
             agent_id=str(agent_id),
             name=name,
             retrieval_k=self.retrieval_k,
             search_type=self.search_type,
+            rerank_enabled=self.rerank_enabled,
         )
 
     # ------------------------------------------------------------------ #
@@ -124,6 +141,8 @@ class RAGAgent(BaseAgent):
                 )
                 self.llm = None
 
+            # 重排器共享同一 LLM（未配置时 active=False，重排自动旁路）
+            self.reranker.llm = self.llm
             self.is_initialized = True
             logger.info("RAGAgent initialized successfully")
             return True
@@ -152,6 +171,9 @@ class RAGAgent(BaseAgent):
                 setattr(self, name, components[name])
         if self.vector_store and self.retriever is None:
             self.retriever = SemanticRetriever(vector_store=self.vector_store)
+        # 重排器跟随注入的 LLM（测试注入 llm=Mock 后重排自动启用）
+        if self.reranker is not None:
+            self.reranker.llm = self.llm
 
     async def _ensure_ready(self) -> None:
         if not self.is_initialized:
@@ -192,11 +214,19 @@ class RAGAgent(BaseAgent):
 
         k = int(task_input.get("k", self.retrieval_k))
         search_type = task_input.get("search_type", self.search_type)
+        rerank_on = self._rerank_active()
 
-        # 0. 语义缓存：命中直接返回（每用户作用域）
+        # 0. 语义缓存：命中直接返回（每用户作用域）。
+        #    key 区分是否走重排：不同管道产出不同答案，不能互相复用
         cache_key = None
         if self.semantic_cache is not None:
-            cache_key = self.semantic_cache.make_key(user_id, query, k, search_type)
+            cache_key = self.semantic_cache.make_key(
+                user_id,
+                query,
+                k,
+                search_type,
+                extra="rerank" if rerank_on else "",
+            )
             cached = self.semantic_cache.get(user_id, cache_key)
             if cached is not None:
                 cached["cache"] = {
@@ -207,16 +237,48 @@ class RAGAgent(BaseAgent):
                 logger.info("RAG answer cache hit", user_id=str(user_id), query=query)
                 return cached
 
-        # 1. 检索（仅该用户 collection）
-        logger.info("Starting retrieval", user_id=str(user_id), query=query, k=k)
-        retrieved_docs = await self.retriever.retrieve(
-            query=query, user_id=user_id, k=k, search_type=search_type
+        # 1. 第一阶段召回（仅该用户 collection）。
+        #    重排开启时放大候选数留足重排空间；关闭时与最终 k 一致，行为不变
+        stage1_k = (
+            min(k * self.rerank_candidate_multiplier, self.rerank_max_candidates)
+            if rerank_on
+            else k
         )
+        logger.info(
+            "Starting retrieval (stage 1 recall)",
+            user_id=str(user_id),
+            query=query,
+            k=k,
+            stage1_k=stage1_k,
+            search_type=search_type,
+            rerank=rerank_on,
+        )
+        retrieved_docs = await self.retriever.retrieve(
+            query=query, user_id=user_id, k=stage1_k, search_type=search_type
+        )
+        stage1_count = len(retrieved_docs)
 
-        # 2. 构建上下文
+        # 2. 第二阶段重排：LLM 打分排序并截断到 top-k（失败自动降级原序）
+        rerank_scores = None
+        if rerank_on and stage1_count > 1:
+            retrieved_docs = await self.reranker.rerank(
+                query, retrieved_docs, k=k
+            )
+            rerank_scores = self.reranker.last_scores
+            logger.info(
+                "Stage-2 rerank completed",
+                user_id=str(user_id),
+                candidates=stage1_count,
+                final=len(retrieved_docs),
+            )
+        elif stage1_k > k and stage1_count > k:
+            # 未启用重排但召回多于 k（如配置放大但 LLM 缺失）：保守截断到 k
+            retrieved_docs = retrieved_docs[:k]
+
+        # 3. 构建上下文
         context = self.retriever.build_context(retrieved_docs)
 
-        # 3. 生成答案
+        # 4. 生成答案
         if self.llm and context:
             answer = await self._generate_answer(query, context)
         else:
@@ -240,6 +302,12 @@ class RAGAgent(BaseAgent):
             ],
             "num_retrieved": len(retrieved_docs),
             "context_length": len(context),
+            "rerank": {
+                "enabled": rerank_on,
+                "candidates": stage1_count,
+                "final": len(retrieved_docs),
+                "scores": rerank_scores,
+            },
             "cache": {
                 "enabled": bool(self.semantic_cache and self.semantic_cache.enabled),
                 "hit": False,
@@ -247,7 +315,7 @@ class RAGAgent(BaseAgent):
             },
         }
 
-        # 4. 回填缓存（仅缓存可复现的快照字段，命中时再覆写 cache 状态）
+        # 5. 回填缓存（仅缓存可复现的快照字段，命中时再覆写 cache 状态）
         if self.semantic_cache is not None and cache_key:
             snapshot = {
                 key: result[key]
@@ -258,6 +326,7 @@ class RAGAgent(BaseAgent):
                     "retrieved_documents",
                     "num_retrieved",
                     "context_length",
+                    "rerank",
                 )
             }
             self.semantic_cache.put(user_id, cache_key, snapshot)
@@ -607,7 +676,16 @@ class RAGAgent(BaseAgent):
             "knowledge_base_management",
             "tenant_isolation",
             "semantic_cache",
+            "reranking",  # 两阶段重排（LLM 点级，需配置 LLM 生效）
         ]
+
+    def _rerank_active(self) -> bool:
+        """重排是否在本 Agent 真正参与链路"""
+        return bool(
+            self.reranker is not None
+            and self.reranker.active
+            and self.reranker.llm is not None
+        )
 
     def _invalidate_user_cache(self, user_id) -> None:
         """知识库变更后使该用户语义缓存失效"""

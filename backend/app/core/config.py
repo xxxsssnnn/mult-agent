@@ -98,6 +98,15 @@ class Settings:
     RAG_CACHE_TTL_SECONDS: int = int(os.getenv("RAG_CACHE_TTL_SECONDS", "3600"))
     # 每用户缓存条目上限（LRU 裁剪）
     RAG_CACHE_MAX_ENTRIES_PER_USER: int = int(os.getenv("RAG_CACHE_MAX_ENTRIES_PER_USER", "200"))
+    # --- Enterprise RAG (Phase 3): 两阶段重排 ---
+    # 是否启用 LLM 点级重排（第二段）。仅当同时配置了 OPENAI_API_KEY 才实际生效
+    RAG_RERANK_ENABLED: bool = os.getenv("RAG_RERANK_ENABLED", "True").lower() == "true"
+    # 第一阶段召回放大系数：stage1_k = min(k * 该系数, 上限)，重排后再截断到 k
+    RAG_RERANK_CANDIDATE_MULTIPLIER: int = int(os.getenv("RAG_RERANK_CANDIDATE_MULTIPLIER", "3"))
+    # 送入重排器候选上限（防 prompt 过长 / 成本失控）
+    RAG_RERANK_MAX_CANDIDATES: int = int(os.getenv("RAG_RERANK_MAX_CANDIDATES", "30"))
+    # 重排 prompt 中单文档内容截断长度
+    RAG_RERANK_MAX_DOC_CHARS: int = int(os.getenv("RAG_RERANK_MAX_DOC_CHARS", "600"))
     # Embedding 后端: openai / huggingface
     RAG_EMBEDDING_MODEL_TYPE: str = os.getenv("RAG_EMBEDDING_MODEL_TYPE", "openai")
     RAG_EMBEDDING_MODEL_NAME: str = os.getenv("RAG_EMBEDDING_MODEL_NAME", "")

@@ -98,6 +98,12 @@ class Settings:
     RAG_CACHE_TTL_SECONDS: int = int(os.getenv("RAG_CACHE_TTL_SECONDS", "3600"))
     # 每用户缓存条目上限（LRU 裁剪）
     RAG_CACHE_MAX_ENTRIES_PER_USER: int = int(os.getenv("RAG_CACHE_MAX_ENTRIES_PER_USER", "200"))
+    # 语义命中层（精确未命中时对同管道 profile 条目做嵌入余弦比较，复用近似问法答案）
+    RAG_CACHE_SEMANTIC_ENABLED: bool = os.getenv("RAG_CACHE_SEMANTIC_ENABLED", "True").lower() == "true"
+    # 语义复用的相似度下限（低于此值宁可重新生成，防止无关问法串答案）
+    RAG_CACHE_SEMANTIC_THRESHOLD: float = float(os.getenv("RAG_CACHE_SEMANTIC_THRESHOLD", "0.90"))
+    # 参与语义命中查询的最短长度（过短问法缺乏判别力，直接走纯精确缓存）
+    RAG_CACHE_SEMANTIC_MIN_QUERY_LEN: int = int(os.getenv("RAG_CACHE_SEMANTIC_MIN_QUERY_LEN", "6"))
     # --- Enterprise RAG (Phase 3): 两阶段重排 ---
     # 是否启用 LLM 点级重排（第二段）。仅当同时配置了 OPENAI_API_KEY 才实际生效
     RAG_RERANK_ENABLED: bool = os.getenv("RAG_RERANK_ENABLED", "True").lower() == "true"

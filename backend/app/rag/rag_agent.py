@@ -70,10 +70,20 @@ class RAGAgent(BaseAgent):
         self.retrieval_k = config.get("retrieval_k", settings.RAG_RETRIEVAL_K)
         self.search_type = config.get("search_type", settings.RAG_SEARCH_TYPE)
         # 语义缓存（每用户作用域；知识库变更事件失效 + TTL 兜底）
+        # 语义命中层：精确未命中时对同管道条目做嵌入余弦比较（无嵌入器自动退化）
         self.semantic_cache = SemanticCache(
             enabled=settings.RAG_CACHE_ENABLED,
             ttl_seconds=settings.RAG_CACHE_TTL_SECONDS,
             max_entries_per_user=settings.RAG_CACHE_MAX_ENTRIES_PER_USER,
+            semantic_enabled=config.get(
+                "cache_semantic_enabled", settings.RAG_CACHE_SEMANTIC_ENABLED
+            ),
+            semantic_threshold=config.get(
+                "cache_semantic_threshold", settings.RAG_CACHE_SEMANTIC_THRESHOLD
+            ),
+            semantic_min_query_len=config.get(
+                "cache_semantic_min_query_len", settings.RAG_CACHE_SEMANTIC_MIN_QUERY_LEN
+            ),
         )
 
         # 两阶段重排：先放大召回，再 LLM 点级打分截断到 top-k。
@@ -243,33 +253,61 @@ class RAGAgent(BaseAgent):
             self.transformer.min_query_len if self.transformer is not None else 0
         )
 
-        # 0. 语义缓存：命中直接返回（每用户作用域）。
-        #    key 区分管道差异（重排 / 查询转换）：不同管道产出不同答案，不能互相复用
+        # 0. 语义缓存（每用户作用域）：命中直接返回。
+        #    key 区分管道差异（重排 / 查询转换）：不同管道产出不同答案，不能互相复用。
+        #    精确未命中时走语义命中层：嵌入当前查询，与同用户同管道 profile 的缓存
+        #    条目做余弦比较（≥ 阈值即复用近似问法答案）；无嵌入器时自动退化为纯精确缓存
         cache_key = None
+        cache_qvec = None  # 语义通道已计算的查询向量（回填缓存时复用，避免二次嵌入）
+        cache_match = None
+        cache_extra = ""
         if self.semantic_cache is not None:
-            cache_key = self.semantic_cache.make_key(
-                user_id,
-                query,
-                k,
-                search_type,
-                extra="|".join(
-                    tag
-                    for tag in (
-                        "rerank" if rerank_on else "",
-                        "transform" if transform_on else "",
-                    )
-                    if tag
-                ),
+            cache_extra = "|".join(
+                tag
+                for tag in (
+                    "rerank" if rerank_on else "",
+                    "transform" if transform_on else "",
+                )
+                if tag
             )
-            cached = self.semantic_cache.get(user_id, cache_key)
+            cache_key = self.semantic_cache.make_key(
+                user_id, query, k, search_type, extra=cache_extra
+            )
+            semantic_eligible = (
+                self.semantic_cache.semantic_enabled
+                and self.embedding_service is not None
+                and len(query) >= self.semantic_cache.semantic_min_query_len
+            )
+            cached, cache_match = await self.semantic_cache.lookup(
+                user_id,
+                cache_key,
+                query=query,
+                profile=self.semantic_cache.profile(k, search_type, extra=cache_extra),
+                embedder=self.embedding_service.embed_text if semantic_eligible else None,
+            )
             if cached is not None:
+                cache_kind = (cache_match or {}).get("kind", "exact")
                 cached["cache"] = {
                     "enabled": self.semantic_cache.enabled,
                     "hit": True,
+                    "kind": cache_kind,
                     "key": cache_key,
                 }
-                logger.info("RAG answer cache hit", user_id=str(user_id), query=query)
+                if cache_kind == "semantic":
+                    cached["cache"]["matched_key"] = cache_match.get("key")
+                    cached["cache"]["matched_query"] = cache_match.get("query")
+                    cached["cache"]["score"] = cache_match.get("score")
+                    # 快照中的 query 是原问法文本；语义命中时回写当前问法供调用方展示
+                    cached["query"] = query
+                logger.info(
+                    "RAG answer cache hit",
+                    user_id=str(user_id),
+                    query=query,
+                    kind=cache_kind,
+                )
                 return cached
+            # 未命中时携带已计算的查询向量供回填复用（语义层不可用时为 None）
+            cache_qvec = (cache_match or {}).get("embedding")
 
         # 1. 查询转换（Phase 4）：LLM 多查询扩展。
         #    变体列表恒以原文开头（基线召回不劣化）；未启用时即 [query]
@@ -375,14 +413,24 @@ class RAGAgent(BaseAgent):
                 "enabled": bool(self.semantic_cache and self.semantic_cache.enabled),
                 "hit": False,
                 "key": cache_key,
+                **(
+                    {"reason": cache_match.get("reason")}
+                    if cache_match and cache_match.get("kind") == "miss"
+                    else {}
+                ),
             },
         }
         # 评估扩展（可选）：携带模型实际看到的全文片段，不参与缓存快照
         if task_input.get("include_full_documents"):
             result["full_documents"] = [doc.page_content for doc in retrieved_docs]
 
-        # 5. 回填缓存（仅缓存可复现的快照字段，命中时再覆写 cache 状态）
-        if self.semantic_cache is not None and cache_key:
+        # 5. 回填缓存（仅缓存可复现的快照字段，命中时再覆写 cache 状态）。
+        #    带上 query/embedding 的条目才能参与后续语义命中；嵌入不可用时退化为纯精确条目
+        if (
+            self.semantic_cache is not None
+            and cache_key
+            and self.semantic_cache.enabled
+        ):
             snapshot = {
                 key: result[key]
                 for key in (
@@ -396,7 +444,24 @@ class RAGAgent(BaseAgent):
                     "rerank",
                 )
             }
-            self.semantic_cache.put(user_id, cache_key, snapshot)
+            embedding = cache_qvec
+            if (
+                embedding is None
+                and self.semantic_cache.semantic_enabled
+                and self.embedding_service is not None
+            ):
+                try:
+                    embedding = await self.embedding_service.embed_text(query)
+                except Exception:  # noqa: BLE001 —— 嵌入可选，失败不影响缓存写入
+                    embedding = None
+            self.semantic_cache.store(
+                user_id,
+                cache_key,
+                snapshot,
+                query=query,
+                profile=self.semantic_cache.profile(k, search_type, extra=cache_extra),
+                embedding=embedding,
+            )
 
         logger.info(
             "RAG execution completed",
@@ -717,6 +782,8 @@ class RAGAgent(BaseAgent):
                 if self.document_processor
                 else []
             )
+        # 语义缓存命中统计（精确/语义/近失分布，供命中率调优）
+        stats["cache"] = self.semantic_cache.stats() if self.semantic_cache else None
         return stats
 
     @staticmethod

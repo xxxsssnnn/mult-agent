@@ -428,11 +428,23 @@ RAG系统会自动验证：
 
 ### Q4: 如何评估RAG系统的效果？
 
-**A**: 可以使用以下指标：
-1. **检索准确率**：检索到的文档是否相关
-2. **答案质量**：生成的答案是否准确、完整
-3. **响应时间**：端到端的延迟
-4. **用户满意度**：实际用户的反馈
+**A**: 平台内置 **RAGAS 离线评估**（可选依赖），直接量化「查询转换 / 重排」等改造的收益：
+
+1. **faithfulness（忠实度）**：答案断言被检索上下文支撑的比例
+2. **answer_relevancy（答案相关性）**：答案与问题的相关程度
+3. **context_precision（上下文精确率）**：相关片段是否排在检索结果前列
+4. **context_recall（上下文召回率）**：参考答案要点被检索上下文覆盖的比例
+
+快速开始：
+
+```powershell
+pip install -r backend\requirements-eval.txt
+$env:OPENAI_API_KEY = "sk-..."
+python backend\examples\rag_eval_runner.py backend\examples\rag_eval_dataset.example.json
+```
+
+详细用法、数据集格式、A/B 对比与常见问题见
+📖 [RAG 评估指南](./RAG_EVALUATION_GUIDE.md)。
 
 ### Q5: RAG可以和记忆系统一起使用吗？
 

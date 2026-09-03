@@ -707,12 +707,13 @@ python examples/rag_demo.py
 - ✅ 完整的REST API
 - ✅ 文档和示例代码
 
-### 计划中的v2.0
-- [ ] 混合检索（BM25 + 向量）
-- [ ] Cross-Encoder重排序
+### v2.0 计划与实际进展
+- [x] 混合检索（BM25 + 向量 + RRF 融合）
+- [x] 查询扩展（LLM 多查询扩展 / 查询转换，变体召回后 RRF 融合）
+- [x] LLM 点级两阶段重排（未采用 Cross-Encoder，避免引入重型模型依赖）
+- [x] 评估框架（RAGAS 离线评估，可选依赖；见 RAG_EVALUATION_GUIDE.md）
+- [ ] Cross-Encoder 重排序（如需更强排序，可基于现重排接口替换）
 - [ ] 多模态支持（图像、音频）
-- [ ] 查询扩展
-- [ ] 评估框架
 
 ---
 

@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-09-03 RAG RAGAS 离线评估框架
+
+**提交**：`09526e4`（配套测试 `71990d3`）
+
+**改了什么**：
+- 新增 `backend/app/rag/evaluator.py`：RAGAS 指标评估器（可选依赖、顶部零导入）
+  - 指标：`faithfulness / answer_relevancy / context_precision / context_recall`（含中文说明、默认全开、未知指标校验）
+  - 样本归一化：`question/answer/contexts/ground_truth`，容错 `ground_truths` 别名与字符串→列表
+  - **自动适配 ragas 两代 API**：0.1.x（HF Dataset + `metrics.base.set_llm/set_embeddings`）与 0.2.x（`EvaluationDataset/SingleTurnSample`，llm/embeddings 走 evaluate 参数）；未安装/版本不支持 → 带安装指引的 `RAGEvaluationError`，绝不拖垮主链路
+  - 结构化报告：指标均值 + 逐问题明细（NaN/缺失归一为 None，均值只统计有效值）
+- `RAGAgent.execute` 增可选 `include_full_documents`：携带模型实际看到的**全文片段**（结果中的 `retrieved_documents` 为 200 字符预览，供评估不可用）；不进语义缓存快照，默认关闭零影响
+- 端到端 runner `backend/examples/rag_eval_runner.py`：自包含数据集（corpus+questions）导入隔离租户 → 逐问跑完整实时链路（自动关闭语义缓存）→ RAGAS 打分 → 写 JSON 报告；支持 `--no-rerank/--no-transform` 做 A/B 对照
+- 示例数据集 `backend/examples/rag_eval_dataset.example.json`（3 篇语料 + 5 问）；可选依赖清单 `backend/requirements-eval.txt`（`ragas>=0.1.10`）
+- 文档：新增 📖 `docs/RAG_EVALUATION_GUIDE.md`；FAQ Q4 更新为具体指标与开箱步骤；架构文档 v2.0 路线进度同步
+- `backend/tests/test_rag_eval.py`（38 项断言）：假 ragas/datasets 注入，**离线**覆盖归一化、指标校验、报告聚合、legacy/v2 双代适配、LLM/Embedding 装配时机、未安装降级
+
+**为什么这么改**：
+- 「查询转换/重排」这类改造必须能量化收益，否则无从证明价值；RAGAS 是业界通用离线评估标准
+- 平台坚持零重依赖与可离线测试：ragas 仅在评估命令真正运行时惰性加载，编排逻辑全部用假模块回归
+
+**解决了什么问题**：
+- 建立「检索质量 → 生成质量」的量化基线：context_recall 低提示调大 k/开启查询转换，context_precision 低提示开启重排
+- 评估公平性：contexts 用模型真实看到的全文（非截断预览），缓存关闭保证测的是实时链路
+- 开发者无需懂 ragas 内部：一份自包含数据集 + 一条命令即可出报告
+
+---
+
 ## 2026-09-03 RAG 查询转换（LLM 多查询扩展）
 
 **提交**：`d1bcdd0`（配套测试 `fc0d497`）

@@ -102,6 +102,34 @@ HTTP 层开启（`POST /api/v1/workflows/code-review` 与 `/task-planner`）：
 不传 `session_id` 时服务端自动生成并随结果 `metadata.memory.session_id` 返回；
 下一次请求带上同一 `session_id` 即可延续会话记忆（自动做长短期记忆合并与摘要）。
 
+### 4. 任务复盘（Task Recap）
+
+长任务（多 Agent / 多轮次）执行结束后，CodeReview / TaskPlanner 自动生成**结构化执行复盘**，
+随结果 `metadata.recap` 返回；若启用了会话记忆，复盘文本会以
+`kind=task_recap` 的 assistant 消息写入共享会话——后续同会话请求在 `get_context()`
+中即可感知"上次任务做到哪、结果如何"。
+
+```python
+result = await workflow.execute({"user_input": "开发一个订单管理系统", ...})
+recap = result["metadata"]["recap"]
+# recap = {
+#   "workflow": "task_planner_workflow",
+#   "label": "任务规划执行",
+#   "objective": "开发一个订单管理系统",
+#   "success": True,
+#   "completed_at": "2026-09-03T09:26:05+00:00",
+#   "attempts": 1,
+#   "iterations": None,
+#   "summary": {"total_tasks": 3, "completed_tasks": 2, "failed_tasks": 1},
+#   "tasks": [{"id": 1, "type": "analysis", "status": "completed", "summary": "架构设计"}, ...],
+#   "notes": [...],
+# }
+```
+
+HTTP 层另支持**长任务归档留痕**（默认开启，可传 `"archive": false` 关闭）：
+执行结果自动写入 `tasks` 表——父记录为一次执行复盘（title 形如 `[任务规划] 需求`），
+TaskPlanner 的每个子任务会作为子记录落库。此后可在 `GET /api/v1/tasks` 中查询历史执行档案。
+
 ## 📖 API端点
 
 所有记忆相关的API都位于 `/api/v1/memory/` 路径下。

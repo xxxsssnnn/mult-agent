@@ -31,6 +31,43 @@
 
 ---
 
+## 2026-09-03 Workflow 长任务复盘（Task Recap）与归档
+
+**提交**：`e7bbd85` + `c41ccf8`（配套测试 `7d5dcaa`）
+
+**改了什么**：
+- 新增 `workflows/recap.py`：`build_recap()` 结构化复盘生成器（workflow 标签、目标、
+  成功与否、尝试/迭代次数、任务汇总、子任务明细、备注；纯函数、确定性、零外部依赖）
+  与 `format_recap()` 可读文本渲染（Markdown 风格，用于写入记忆与展示）
+- `BaseWorkflow.record_recap(text)`：仅在启用会话记忆时将复盘以
+  `kind=task_recap` 的 assistant 消息写入共享会话；写入失败静默降级不阻断主流程
+- CodeReview / TaskPlanner：**执行结束自动生成复盘**并随 `metadata.recap` 回传
+  （成功与重试耗尽两种返回路径均覆盖）；复盘随后续 `get_context()` 自然携带，
+  同会话"上次任务做到哪、结果如何"无需再拼进请求
+- HTTP（`POST /api/v1/workflows/code-review`、`/task-planner`）新增 `archive` 选项
+  （默认 true）：执行结果自动归档进 `tasks` 表——父记录为一次执行复盘
+  （title 形如 `[任务规划] 需求`），TaskPlanner 各子任务作为子记录落库
+  （`GET /api/v1/tasks` 即可查询历史执行档案）；归档尽力而为，DB 异常不影响主流程
+- 修复既有缺陷：`CodeReviewState` 未声明 `structured_review` 通道，langgraph 按
+  TypedDict 模式丢弃该键，导致 `metadata.has_structured_review` 恒为 False、
+  API 返回的 `structured_review` 永远为 None——已补声明并回归验证
+- 测试：`tests/test_workflow_recap.py`（41 项断言，纯离线）覆盖复盘结构/文本渲染、
+  record_recap 记忆写入与静默降级、两工作流自动复盘与记忆写入、无记忆时仍回传复盘
+- 文档：`MEMORY_USAGE_GUIDE.md` 新增「任务复盘（Task Recap）」小节
+
+**为什么这么改**：
+- 第 4 轮打通了"消息级会话记忆"，但长任务跑完没有结构化的**执行留痕**：
+  用户无法从记忆/档案里知道上一次任务规划到底做了哪几个子任务、哪些失败
+- `tasks` 表与 tasks CRUD 早已存在却没有任何 Workflow 写入——自动归档让其成为
+  真正的"长任务执行档案"
+
+**解决了什么问题**：
+- 长任务从"执行完即忘"变成"可复盘、可延续、可查询"：同一会话再次启动时上下文
+  自动带上上次复盘；跨会话可在任务列表中翻查历史执行档案
+- 顺带修复结构化审查结果一直无法透出 API 的既有缺陷
+
+---
+
 ## 2026-09-03 RAG RAGAS 离线评估框架
 
 **提交**：`09526e4`（配套测试 `71990d3`）

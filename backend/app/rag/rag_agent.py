@@ -1,4 +1,4 @@
-"""RAG Agent - 多租户检索增强生成 Agent（Enterprise RAG Phase 1/2/3/4）
+"""RAG Agent - 多租户检索增强生成 Agent（Enterprise RAG Phase 1/2/3/4/5）
 
 企业级改造要点：
 - 租户隔离：execute/检索强制 user_id（缺失即拒绝），向量操作限定在用户自己的 collection
@@ -8,6 +8,8 @@
 - 语义缓存：查询→答案按用户作用域缓存，知识库变更事件失效 + TTL 兜底
 - 查询转换（Phase 4）：LLM 多查询扩展，多变体召回后 RRF 融合，覆盖单查询漏检
 - 两阶段重排（Phase 3）：先放大召回，再 LLM 点级打分截断到 top-k
+- 会话版问答（Phase 5）：execute 可选 session_id，注入该用户+会话记忆上下文辅助
+  理解指代并记录问答消息；上下文激活时自动旁路 per-user 语义缓存防陈旧答案
 - 可测试性：组件可注入（configure_components），方便以 fake 替换真实后端
 """
 
@@ -37,6 +39,9 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# 会话上下文注入生成时的最大字符数（控制 token 成本；超出时取末尾最近上下文）
+RAG_CONVERSATION_MAX_CHARS = 2400
+
 
 class RAGAgent(BaseAgent):
     """
@@ -46,6 +51,8 @@ class RAGAgent(BaseAgent):
     2. 仅在该用户自己的向量 collection 中检索相关文档
     3. 将检索结果作为上下文提供给 LLM
     4. LLM 基于上下文生成答案
+    5. 会话版问答（Phase 5）：execute 可选 session_id，注入该用户+会话记忆上下文
+       辅助理解指代并记录问答消息（记忆层失败自动降级为无状态问答）
     """
 
     def __init__(
@@ -64,6 +71,11 @@ class RAGAgent(BaseAgent):
         self.llm: Optional[ChatOpenAI] = None
         # 文档记录仓储（测试可注入内存实现）
         self.document_repo: Optional[RAGDocumentRepository] = None
+
+        # 会话记忆（Phase 5 会话版问答）：execute(session_id=...) 时按 用户+会话
+        # 存取短期/长期记忆。测试可注入 _memory_factory 以内存替身替换真实
+        # MemoryManager（离线无 DB 环境）；生产保持 None 走默认实现。
+        self._memory_factory = None
 
         # 检索参数（config 优先，其次 settings 全局配置）
         config = config or {}
@@ -226,18 +238,35 @@ class RAGAgent(BaseAgent):
     # 执行链路
     # ------------------------------------------------------------------ #
 
-    async def execute(self, task_input: Dict[str, Any], user_id=None) -> Dict[str, Any]:
+    async def execute(
+        self,
+        task_input: Dict[str, Any],
+        user_id=None,
+        *,
+        session_id: Optional[str] = None,
+        db_session=None,
+    ) -> Dict[str, Any]:
         """
         执行 RAG 查询（严格限定在该用户自己的向量 collection 内）。
 
         Args:
             task_input: 含 query / k / search_type / include_full_documents
             user_id: 租户用户（缺失时从 task_input["user_id"] 读取）
+            session_id: 可选会话 ID。传入即开启会话版问答（Phase 5）：注入该
+                用户+会话的记忆上下文辅助理解指代，并记录 user/assistant 消息，
+                支持多轮追问；不传则维持无状态单轮问答。
+            db_session: 会话持久化所需的数据库会话（session_id 为空时可省）。
 
         Returns:
             包含答案与检索结果的字典（调用方负责捕获领域异常）。
             include_full_documents=True 时额外携带 full_documents（检索命中的全文
             片段列表，供 RAGAS 评估等使用）；该字段不写入语义缓存。
+            会话版（session_id 非空）额外携带 session 元数据。
+
+        安全规则：会话上下文非空（含跨会话记忆检索命中）说明答案可能依赖历史，
+        此时自动旁路 per-user 语义缓存，避免跨上下文返回陈旧答案；会话上下文为
+        空（会话首轮）等价于无状态查询，仍可正常参与 per-user 语义缓存。
+        记忆层任何失败（含 DB/Redis 不可用）都降级为无状态 RAG，绝不阻断问答。
         """
         await self._ensure_ready()
         user_id = self._require_user_id(user_id or task_input.get("user_id"))
@@ -253,6 +282,43 @@ class RAGAgent(BaseAgent):
             self.transformer.min_query_len if self.transformer is not None else 0
         )
 
+        # 0a. 会话记忆（Phase 5 会话版问答）：可选 session_id。
+        #     流程：取该用户+会话记忆上下文 → 注入生成 prompt（仅辅助理解指代，
+        #     不参与检索、不作为事实依据）→ 记录本轮 user/assistant 消息。
+        session_manager = None
+        conversation_context = ""
+        cache_bypass = False
+        if session_id:
+            manager = None
+            try:
+                manager = self._build_session_manager(user_id, session_id, db_session)
+                await manager.initialize()
+                conversation_context = ((await manager.get_context()) or "").strip()
+            except Exception as e:  # noqa: BLE001 —— 记忆层失败降级为无状态 RAG
+                logger.warning(
+                    "Session memory unavailable; falling back to stateless RAG",
+                    user_id=str(user_id),
+                    session_id=str(session_id),
+                    error=str(e),
+                )
+            if manager is not None:
+                session_manager = manager
+                try:
+                    user_text = (task_input.get("query") or "").strip()
+                    if user_text:
+                        await session_manager.add_message("user", user_text)
+                except Exception as e:  # noqa: BLE001 —— 记录失败不影响问答
+                    logger.warning(
+                        "Failed to record session user message",
+                        session_id=str(session_id),
+                        error=str(e),
+                    )
+                if conversation_context:
+                    cache_bypass = True
+                    conversation_context = conversation_context[
+                        -RAG_CONVERSATION_MAX_CHARS:
+                    ]
+
         # 0. 语义缓存（每用户作用域）：命中直接返回。
         #    key 区分管道差异（重排 / 查询转换）：不同管道产出不同答案，不能互相复用。
         #    精确未命中时走语义命中层：嵌入当前查询，与同用户同管道 profile 的缓存
@@ -261,7 +327,8 @@ class RAGAgent(BaseAgent):
         cache_qvec = None  # 语义通道已计算的查询向量（回填缓存时复用，避免二次嵌入）
         cache_match = None
         cache_extra = ""
-        if self.semantic_cache is not None:
+        # 会话上下文激活时旁路 per-user 语义缓存（避免跨上下文返回陈旧答案）
+        if self.semantic_cache is not None and not cache_bypass:
             cache_extra = "|".join(
                 tag
                 for tag in (
@@ -305,6 +372,24 @@ class RAGAgent(BaseAgent):
                     query=query,
                     kind=cache_kind,
                 )
+                if session_manager is not None:
+                    # 会话首轮命中缓存：仍把助手答案入库，保持会话消息成对连续
+                    try:
+                        hit_text = (cached.get("answer") or "").strip()
+                        if hit_text:
+                            await session_manager.add_message("assistant", hit_text)
+                    except Exception as e:  # noqa: BLE001 —— 记录失败不影响问答
+                        logger.warning(
+                            "Failed to record session assistant message",
+                            session_id=str(session_id),
+                            error=str(e),
+                        )
+                    cached["session"] = {
+                        "session_id": str(session_id),
+                        "enabled": True,
+                        "context_active": False,
+                        "cache_bypassed": False,
+                    }
                 return cached
             # 未命中时携带已计算的查询向量供回填复用（语义层不可用时为 None）
             cache_qvec = (cache_match or {}).get("embedding")
@@ -374,9 +459,11 @@ class RAGAgent(BaseAgent):
         # 3. 构建上下文
         context = self.retriever.build_context(retrieved_docs)
 
-        # 4. 生成答案
+        # 4. 生成答案（会话版注入会话上下文，仅辅助理解指代）
         if self.llm and context:
-            answer = await self._generate_answer(query, context)
+            answer = await self._generate_answer(
+                query, context, conversation=conversation_context
+            )
         else:
             answer = self._generate_fallback_answer(query, retrieved_docs)
 
@@ -418,11 +505,44 @@ class RAGAgent(BaseAgent):
                     if cache_match and cache_match.get("kind") == "miss"
                     else {}
                 ),
+                **(
+                    {"reason": "session_context_active"}
+                    if cache_bypass
+                    and self.semantic_cache is not None
+                    and self.semantic_cache.enabled
+                    else {}
+                ),
             },
         }
         # 评估扩展（可选）：携带模型实际看到的全文片段，不参与缓存快照
         if task_input.get("include_full_documents"):
             result["full_documents"] = [doc.page_content for doc in retrieved_docs]
+
+        # 4a. 会话记忆：assistant 消息入库（与前面 user 消息成对，保证会话连续），
+        #     并透出会话元数据供调用方观测（enabled / context_active / 缓存旁路）
+        if session_manager is not None:
+            try:
+                answer_text = (result.get("answer") or "").strip()
+                if answer_text:
+                    await session_manager.add_message("assistant", answer_text)
+            except Exception as e:  # noqa: BLE001 —— 记录失败不影响问答
+                logger.warning(
+                    "Failed to record session assistant message",
+                    session_id=str(session_id),
+                    error=str(e),
+                )
+        if session_id:
+            result["session"] = {
+                "session_id": str(session_id),
+                "enabled": session_manager is not None,
+                "context_active": bool(conversation_context),
+                "cache_bypassed": cache_bypass,
+                **(
+                    {"error": "memory_unavailable"}
+                    if session_manager is None
+                    else {}
+                ),
+            }
 
         # 5. 回填缓存（仅缓存可复现的快照字段，命中时再覆写 cache 状态）。
         #    带上 query/embedding 的条目才能参与后续语义命中；嵌入不可用时退化为纯精确条目
@@ -474,8 +594,43 @@ class RAGAgent(BaseAgent):
         )
         return result
 
-    async def _generate_answer(self, query: str, context: str) -> str:
-        """使用 LLM 生成答案（仅基于提供的上下文，禁止编造）"""
+    # ------------------------------------------------------------------ #
+    # 会话记忆（Phase 5 会话版问答）
+    # ------------------------------------------------------------------ #
+
+    def set_memory_factory(self, factory) -> None:
+        """注入会话记忆工厂（默认 None → 走真实 MemoryManager，需要 DB 持久化）。
+
+        工厂签名：factory(session_id, user_id, db_session) → MemoryManager 兼容对象，
+        需实现 initialize() / get_context() / add_message(role, content)。
+        用于离线测试注入内存替身；生产环境请保持 None。
+        """
+        self._memory_factory = factory
+
+    def _build_session_manager(self, user_id, session_id, db_session):
+        """按 用户+会话 构造会话记忆管理器。
+
+        每请求新建局部实例（不落在 self 上），避免全局共享 Agent 实例在并发
+        请求间串状态。
+        """
+        if self._memory_factory is not None:
+            return self._memory_factory(
+                session_id=session_id, user_id=user_id, db_session=db_session
+            )
+        from app.memory import MemoryManager
+
+        return MemoryManager(
+            session_id=str(session_id), user_id=str(user_id), db_session=db_session
+        )
+
+    async def _generate_answer(
+        self, query: str, context: str, conversation: str = ""
+    ) -> str:
+        """使用 LLM 生成答案（仅基于提供的上下文，禁止编造）。
+
+        会话版（conversation 非空）会把多轮历史单独作为“聊天上下文”呈现，仅用于
+        理解问题中的指代；它不是事实依据，回答仍只以“上下文信息”为准。
+        """
         system_prompt = """你是一个专业的问答助手。请基于提供的上下文信息来回答用户的问题。
 
 要求：
@@ -485,7 +640,15 @@ class RAGAgent(BaseAgent):
 4. 引用信息来源时，请注明是哪一个来源
 5. 不要编造或推测上下文之外的信息"""
 
-        user_prompt = f"""上下文信息：
+        conversation_block = ""
+        if conversation and conversation.strip():
+            conversation_block = (
+                "聊天上下文（多轮会话历史；仅用于理解问题中的指代，不要复述，"
+                "也不作为事实依据）：\n"
+                f"{conversation}\n\n"
+            )
+
+        user_prompt = f"""{conversation_block}上下文信息：
 {context}
 
 用户问题：
@@ -813,6 +976,7 @@ class RAGAgent(BaseAgent):
             "semantic_cache",
             "reranking",  # 两阶段重排（LLM 点级，需配置 LLM 生效）
             "query_transformation",  # 查询转换（LLM 多查询扩展，需配置 LLM 生效）
+            "session_memory",  # 会话版问答（Phase 5）：可选 session_id 注入会话上下文
         ]
 
     def _rerank_active(self) -> bool:

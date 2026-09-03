@@ -1,10 +1,12 @@
-"""RAG API - 多租户企业级端点（Enterprise RAG Phase 1）
+"""RAG API - 多租户企业级端点（Enterprise RAG Phase 1/5）
 
 端点按登录用户强制租户隔离：
 - 所有操作（导入/查询/统计/列表/删除/清空）都限定在当前用户的向量 collection 与
   RAGDocument 记录内，杜绝跨用户数据泄漏
 - 领域异常映射为明确 HTTP 状态码（415/413/422/404/503），不再吞错返回 200
 - 上传校验：扩展名白名单 + 大小上限 + 安全落盘（uuid 文件名，防路径穿越）
+- 会话版问答（Phase 5）：/query 传 session_id 注入该用户+会话的记忆上下文辅助
+  理解指代，并持久化问答消息，支持多轮追问（上下文激活时自动旁路语义缓存）
 """
 
 import asyncio
@@ -50,6 +52,15 @@ class QueryRequest(BaseModel):
     k: Optional[int] = Field(None, ge=1, le=50, description="返回结果数量")
     search_type: Optional[str] = Field(
         None, pattern="^(hybrid|similarity|mmr|score)$", description="检索策略"
+    )
+    session_id: Optional[str] = Field(
+        None,
+        max_length=128,
+        description=(
+            "会话 ID：传入则开启会话版问答（Phase 5）。服务端会注入该用户+会话的"
+            "记忆上下文辅助理解指代，并持久化本轮问答消息，使 /rag/query 支持多轮"
+            "追问；不传则维持无状态单轮问答。"
+        ),
     )
 
 
@@ -217,12 +228,18 @@ async def ingest_documents(
 async def query_knowledge_base(
     payload: QueryRequest,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     查询当前用户的知识库（检索仅限该用户的向量 collection）。
 
+    传 session_id 时升级为会话版问答（Phase 5）：
+    - 注入该用户+会话的记忆上下文辅助理解指代，支持多轮追问
+    - 本轮 user/assistant 消息持久化进会话记忆（需要 DB）
+    - 会话上下文激活时自动旁路 per-user 语义答案缓存（避免跨上下文陈旧答案）
+
     Returns:
-        答案与检索到的文档引用
+        答案与检索到的文档引用；会话版额外携带 session 元数据
     """
     try:
         rag_agent = await get_rag_agent()
@@ -231,12 +248,18 @@ async def query_knowledge_base(
             "k": payload.k or rag_agent.retrieval_k,
             "search_type": payload.search_type or rag_agent.search_type,
         }
-        result = await rag_agent.execute(task_input, user_id=current_user.id)
+        result = await rag_agent.execute(
+            task_input,
+            user_id=current_user.id,
+            session_id=payload.session_id,
+            db_session=db if payload.session_id else None,
+        )
         logger.info(
             "Knowledge base queried",
             user_id=str(current_user.id),
             query_length=len(payload.query),
             num_retrieved=result.get("num_retrieved", 0),
+            session_id=payload.session_id,
         )
         return {"success": True, **result}
     except HTTPException:
@@ -389,7 +412,7 @@ async def get_rag_info(
     return {
         "success": True,
         "rag_system": {
-            "version": "1.1",
+            "version": "1.2",
             "tenant_isolation": {
                 "mode": "per-user chroma collection",
                 "collection_prefix": settings.RAG_COLLECTION_PREFIX,
@@ -438,7 +461,7 @@ async def get_rag_info(
             },
             "endpoints": [
                 {"path": "/api/v1/rag/ingest", "method": "POST", "description": "Upload and ingest documents (idempotent, per-user)"},
-                {"path": "/api/v1/rag/query", "method": "POST", "description": "Query current user knowledge base"},
+                {"path": "/api/v1/rag/query", "method": "POST", "description": "Query knowledge base (single-turn); pass session_id for multi-turn session Q&A"},
                 {"path": "/api/v1/rag/documents", "method": "GET", "description": "List current user documents"},
                 {"path": "/api/v1/rag/documents/{id}", "method": "DELETE", "description": "Delete a document"},
                 {"path": "/api/v1/rag/stats", "method": "GET", "description": "Get knowledge base stats"},

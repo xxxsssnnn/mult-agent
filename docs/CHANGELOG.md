@@ -5,6 +5,42 @@
 
 ---
 
+## 2026-09-03 RAG 会话版问答（Phase 5：多轮 KB 问答）
+
+**提交**：`b5b2f2a`（配套测试 `6cb9ed0`；配套文档见 RAG_USAGE_GUIDE v1.2）
+
+**改了什么**：
+- `rag_agent.py`：`execute` 新增可选 `session_id` / `db_session` 参数——
+  传入即开启会话版问答：按 用户+会话 构造 MemoryManager，取会话上下文注入
+  答案生成（单独的“聊天上下文”块，仅辅助消解指代、不作为事实依据），并自动
+  记录 user/assistant 消息（命中 per-user 缓存的首轮也会补记 assistant 消息，
+  保持消息成对连续）；结果透出 `session` 元数据
+  （enabled / context_active / cache_bypassed / 失败原因）
+- **缓存安全约定**：会话上下文非空（含跨会话记忆检索命中）时自动旁路 per-user
+  语义缓存（`cache.reason="session_context_active"`），避免跨上下文返回陈旧答案；
+  会话首轮（上下文为空）与不传 session_id 的无状态查询照常参与缓存
+- **容错降级**：记忆层任何失败（DB/Redis 不可用）都降级为无状态 RAG，
+  绝不让记忆问题阻断核心问答；`set_memory_factory` 支持测试注入内存替身
+- `/rag/query`：`QueryRequest` 新增 `session_id`，路由注入请求级 DB 会话
+  （传 session_id 时才使用）；`/rag/info` 版本升至 1.2 并展示 session_memory 能力
+- 测试：`tests/test_rag_session_memory.py`（22 项断言，纯离线替身）覆盖首轮缓存
+  照常参与/后续轮旁路缓存并重新生成/消息成对记录/跨用户跨会话隔离/记忆层故障降级
+
+**为什么这么改**：
+- 此前 `/rag/query` 是无状态单轮：同样的追问（“那它有哪些限制？”）每次都丢失
+  前文，用户需要反复把背景塞进问题；而记忆系统（短/长程 + 持久化）与 RAG 彼此
+  独立、没有打通
+- 上一轮“Agent 步骤级语义缓存”经设计推演确认收益极低（每轮执行都会推进会话
+  上下文，相同快照几乎不出现，且有过时答案风险），故转向真正缺口的“会话×RAG”
+
+**解决了什么问题**：
+- 单轮 KB 问答升级为多轮会话问答：同一 `session_id` 下追问自动携带前文，
+  user/assistant 消息入库可被记忆检索复用
+- 多轮正确性与缓存成本不冲突：上下文激活即旁路、上下文为空即照常命中，
+  行为可观测（`session` 元数据 + cache reason）
+
+---
+
 ## 2026-09-03 Agents/Workflows 挂载会话记忆
 
 **提交**：`8c84837`（配套测试 `0027016`）

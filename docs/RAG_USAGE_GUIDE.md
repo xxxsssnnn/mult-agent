@@ -453,18 +453,35 @@ python backend\examples\rag_eval_runner.py backend\examples\rag_eval_dataset.exa
 
 ### Q5: RAG可以和记忆系统一起使用吗？
 
-**A**: ✅ 当然可以！两者是互补的：
-- **记忆系统**：保存对话历史，维持上下文
-- **RAG系统**：提供外部知识，增强回答能力
+**A**: ✅ 可以，而且是**一等公民**（Phase 5 会话版问答）：`/rag/query`
+（或 `RAGAgent.execute`）传入 `session_id` 即让同一用户的多轮追问共享会话记忆
+——每轮会话历史会注入答案生成以消解指代（如“那它有哪些限制？”），且
+user/assistant 消息自动持久化；再次带同一 `session_id` 请求时上下文自动衔接。
 
 ```python
-# 结合使用
-agent.set_memory(session_id="session_123")
-rag_result = await rag_agent.execute({
-    "user_input": "公司的报销政策是什么？"
-})
-# RAG提供知识，记忆维持对话连贯性
+# 第一轮：开启会话（也可走 REST：POST /api/v1/rag/query 传 session_id）
+first = await rag_agent.execute(
+    {"query": "公司的报销政策是什么？"},
+    user_id=user.id,
+    session_id="session_123",
+    db_session=db,
+)
+
+# 追问：沿用同一 session_id → 自动携带上一轮上下文（消解“那/它”）
+second = await rag_agent.execute(
+    {"query": "那发票要求呢？"},
+    user_id=user.id,
+    session_id="session_123",
+    db_session=db,
+)
+print(second["session"])
+# {'session_id': 'session_123', 'enabled': True,
+#  'context_active': True, 'cache_bypassed': True}
 ```
+
+注意事项：会话上下文激活时，per-user 语义缓存会被**自动旁路**（避免跨上下文
+返回陈旧答案，见 Q7）；首轮（上下文为空）与不传 `session_id` 的无状态查询不受
+影响。记忆层故障（如 DB 不可用）会自动降级为无状态 RAG，不会阻断问答。
 
 ### Q6: 语义缓存是什么？怎么知道命中的是语义还是精确？
 
@@ -489,7 +506,32 @@ rag_result = await rag_agent.execute({
 调优阈值——`near_misses` 持续偏高说明阈值可适当下调。语义层完全可选：
 未配置嵌入、嵌入失败或查询过短时自动退化为纯精确缓存，不影响主流程。
 
+### Q7: 会话版问答与语义缓存如何共存？为什么有时 cache 被旁路？
+
+**A**: 无状态单轮查询的答案只依赖「问题 + 知识库」，因此可安全地按用户做语义
+缓存；一旦进入会话模式且上下文非空，答案会受历史影响（含消解指代），此时继续
+复用 per-user 缓存可能返回**跨上下文的陈旧答案**。因此实现约定：
+
+- 会话首轮（上下文为空）= 等价无状态，照常参与语义缓存（省成本）；
+- 会话后续轮（上下文激活）→ `cache.hit=false` 且标注
+  `cache.reason="session_context_active"`，强制重新检索 + 生成（保正确）；
+- 不传 `session_id` 的查询永远是无状态语义缓存。
+
+这一约定让“缓存省成本”与“多轮正确性”不冲突；旁路原因与 `session` 元数据
+（enabled / context_active / cache_bypassed）都随响应透出，便于观测。
+
 ## 更新日志
+
+### v1.2 (2026-09-03)
+- ✅ **会话版问答（Phase 5）**：`/rag/query` 与 `RAGAgent.execute` 支持可选
+  `session_id`——注入该用户+会话的记忆上下文辅助消解指代，自动持久化
+  user/assistant 消息，单轮 KB 问答升级为多轮会话问答
+- ✅ **缓存安全约定**：会话上下文激活时自动旁路 per-user 语义缓存（防跨上下文
+  陈旧答案）；首轮/无 session 查询照常命中；结果透出 `session` 元数据与
+  `cache.reason="session_context_active"` 旁路标注
+- ✅ **容错降级**：记忆层不可用（DB 故障等）自动降级为无状态 RAG，不阻断问答
+- ✅ 测试：`tests/test_rag_session_memory.py`（22 项断言，纯离线替身）覆盖
+  首轮/追问/缓存旁路/消息成对记录/跨用户跨会话隔离/故障降级
 
 ### v1.1 (2026-09-03)
 - ✅ **语义缓存升级**：由逐字精确缓存升级为「精确 + 语义」两级——改述/近似问法

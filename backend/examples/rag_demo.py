@@ -6,11 +6,11 @@ from app.rag import RAGAgent, DocumentProcessor, VectorStoreManager, EmbeddingSe
 
 
 async def demo_rag_basic():
-    """演示基本的RAG功能"""
+    """演示基本的RAG功能（多租户：必须携带 user_id）"""
     print("=" * 80)
     print("演示1: 基本RAG功能")
     print("=" * 80)
-    
+
     # 创建RAG Agent
     rag_agent = RAGAgent(
         agent_id=uuid4(),
@@ -18,37 +18,38 @@ async def demo_rag_basic():
         config={
             "retrieval_k": 3,
             "search_type": "similarity",
-            "collection_name": "demo_collection",
             "persist_directory": "./chroma_db_demo"
         }
     )
-    
+
     # 初始化
     await rag_agent.initialize()
     print("\n✓ RAG Agent初始化完成\n")
-    
-    # 检查知识库状态
-    stats = await rag_agent.get_knowledge_base_stats()
+
+    demo_user_id = uuid4()
+    print(f"演示租户 user_id: {demo_user_id}")
+
+    # 检查知识库状态（按用户）
+    stats = await rag_agent.get_knowledge_base_stats(user_id=demo_user_id)
     print(f"知识库统计:")
     print(f"  - 集合名称: {stats.get('collection_name')}")
-    print(f"  - 文档数量: {stats.get('document_count', 0)}")
+    print(f"  - 切块数量: {stats.get('chunk_count', 0)}")
     print(f"  - Embedding模型: {stats.get('embedding_model')}")
     print(f"  - 向量维度: {stats.get('embedding_dimension')}\n")
-    
+
     # 尝试查询（此时知识库为空）
     print("尝试查询空知识库...")
-    result = await rag_agent.execute({
-        "query": "什么是人工智能？",
-        "k": 3
-    })
-    
+    result = await rag_agent.execute(
+        {"query": "什么是人工智能？", "k": 3},
+        user_id=demo_user_id,
+    )
+
     print(f"\n查询结果:")
-    print(f"  - 成功: {result.get('success')}")
     print(f"  - 检索到的文档数: {result.get('num_retrieved', 0)}")
-    if not result.get('success'):
-        print(f"  - 错误: {result.get('error')}")
-    
-    print("\n说明: 由于知识库为空，需要先导入文档才能进行有效查询\n")
+    print(f"  - 答案: {result.get('answer')}\n")
+
+    print("说明: 由于知识库为空，需要先导入文档才能进行有效查询；"
+          "检索严格限定在该用户自己的向量集合内（租户隔离）\n")
 
 
 async def demo_document_processing():
@@ -123,59 +124,59 @@ async def demo_embedding_service():
 
 
 async def demo_vector_store():
-    """演示向量存储功能"""
+    """演示向量存储功能（多租户：每用户独立 collection）"""
     print("=" * 80)
     print("演示4: 向量存储功能")
     print("=" * 80)
-    
+
     # 创建Embedding服务
     embedding_service = EmbeddingService(model_type="huggingface")
-    
-    # 创建向量存储
+
+    # 创建向量存储（无 collection_name 参数：按 user_id 自动分区）
     vector_store = VectorStoreManager(
-        collection_name="demo_vectors",
         persist_directory="./chroma_db_demo",
         embedding_service=embedding_service
     )
-    
+
+    demo_user_id = uuid4()
+    collection_name = VectorStoreManager.collection_name_for(demo_user_id)
+
     print(f"\n向量存储配置:")
-    print(f"  - 集合名称: {vector_store.collection_name}")
+    print(f"  - 用户 collection: {collection_name}")
     print(f"  - 持久化目录: {vector_store.persist_directory}")
     print(f"  - Embedding模型: {embedding_service.model_type}\n")
-    
-    # 获取统计信息
-    stats = await vector_store.get_collection_stats()
-    print(f"当前状态:")
-    print(f"  - 文档数量: {stats['document_count']}")
-    print(f"  - 向量维度: {stats['embedding_dimension']}\n")
-    
-    print("支持的操作:")
-    for op in vector_store.get_supported_operations():
-        print(f"  - {op}")
-    
-    print("\n示例代码:")
-    print("""
-# 添加文档
-from langchain.schema import Document
 
-docs = [
+    # 获取统计信息（按用户）
+    stats = await vector_store.collection_stats(user_id=demo_user_id)
+    print(f"当前状态:")
+    print(f"  - 切块数量: {stats['chunk_count']}")
+    print(f"  - 向量维度: {stats['embedding_dimension']}\n")
+
+    print("示例代码:")
+    print("""
+from langchain.schema import Document
+from uuid import uuid4
+
+doc_id = uuid4()
+chunks = [
     Document(page_content="文档内容1", metadata={"source": "file1.pdf"}),
     Document(page_content="文档内容2", metadata={"source": "file2.pdf"})
 ]
 
-ids = await vector_store.add_documents(docs)
+# 添加切块（自动限定在 user_id 自己的 collection）
+await vector_store.add_chunks(user_id, doc_id, chunks, base_metadata={"filename": "file1.pdf"})
 
-# 相似性搜索
-results = await vector_store.similarity_search("查询文本", k=5)
+# 相似性搜索（仅该用户 collection）
+results = await vector_store.similarity_search(user_id, "查询文本", k=5)
 
 # MMR搜索（平衡相关性和多样性）
-results = await vector_store.max_marginal_relevance_search("查询文本", k=5)
+results = await vector_store.max_marginal_relevance_search(user_id, "查询文本", k=5)
 
-# 删除文档
-await vector_store.delete_documents(ids)
+# 按文档删除
+await vector_store.delete_document_chunks(user_id, doc_id)
     """)
-    
-    print("\n✓ 向量存储准备就绪\n")
+
+    print("\n✓ 向量存储准备就绪（租户隔离）\n")
 
 
 async def demo_full_rag_workflow():
@@ -230,12 +231,15 @@ async def demo_full_rag_workflow():
         print()
     
     print("API端点:")
-    print("  POST /api/v1/rag/ingest   - 上传并导入文档")
-    print("  POST /api/v1/rag/query    - 查询知识库")
-    print("  GET  /api/v1/rag/stats    - 查看统计信息")
-    print("  DELETE /api/v1/rag/clear  - 清空知识库")
-    print("  POST /api/v1/rag/demo     - 功能演示")
-    print("  GET  /api/v1/rag/info     - 系统信息\n")
+    print("  POST   /api/v1/rag/ingest              - 上传并导入文档（幂等）")
+    print("  POST   /api/v1/rag/query               - 查询当前用户知识库")
+    print("  GET    /api/v1/rag/documents           - 分页列出当前用户文档")
+    print("  DELETE /api/v1/rag/documents/{id}      - 删除单个文档")
+    print("  GET    /api/v1/rag/stats               - 查看统计信息")
+    print("  DELETE /api/v1/rag/clear               - 清空当前用户知识库")
+    print("  POST   /api/v1/rag/demo                - 功能演示")
+    print("  GET    /api/v1/rag/info                - 系统信息\n")
+    print("  说明：所有端点按登录用户（Bearer Token）强制租户隔离。\n")
 
 
 async def main():

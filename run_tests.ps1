@@ -25,7 +25,8 @@ $tests = @(
     "tests\test_e2e_memory.py",
     "tests\test_migrations.py",
     "tests\test_memory_decay_expiry.py",
-    "tests\test_celery_registration.py"
+    "tests\test_celery_registration.py",
+    "tests\test_rag_enterprise.py"
 )
 
 $failed = @()

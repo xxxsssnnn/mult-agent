@@ -76,6 +76,31 @@ def _alembic_version():
         conn.close()
 
 
+def _rag_indexes():
+    conn = sqlite3.connect("_test_migrations.db")
+    try:
+        return {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='rag_documents'"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _rag_unique_constraint():
+    conn = sqlite3.connect("_test_migrations.db")
+    try:
+        rows = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='rag_documents'"
+        ).fetchall()
+        return rows[0][0] if rows else ""
+    finally:
+        conn.close()
+
+
 def test_sqlite_migration_creates_tables():
     run_alembic_upgrade()
     tables = _tables()
@@ -86,7 +111,17 @@ def test_sqlite_migration_creates_tables():
     check("memory_entries 复合索引存在", "ix_memory_user_strength_updated" in idx)
     check("归档过滤复合索引存在", "ix_memory_user_archived_strength_updated" in idx)
     check("后台批量扫描索引存在", "ix_memory_archived_strength_updated" in idx)
-    check("alembic_version 记录到 head", _alembic_version() == "0003")
+    check("rag_documents 表存在", "rag_documents" in tables)
+    rag_idx = _rag_indexes()
+    check(
+        f"rag_documents 索引齐全 missing={rag_idx}",
+        {"ix_rag_documents_user_id", "ix_rag_documents_user_created"} <= rag_idx,
+    )
+    check(
+        "rag_documents 幂等唯一约束存在",
+        "uq_rag_documents_user_checksum" in _rag_unique_constraint(),
+    )
+    check("alembic_version 记录到 head", _alembic_version() == "0004")
 
 
 def test_init_db_idempotent():

@@ -1,9 +1,11 @@
-"""RAG Agent - 多租户检索增强生成 Agent（Enterprise RAG Phase 1）
+"""RAG Agent - 多租户检索增强生成 Agent（Enterprise RAG Phase 1/2）
 
 企业级改造要点：
 - 租户隔离：execute/检索强制 user_id（缺失即拒绝），向量操作限定在用户自己的 collection
 - 文档级生命周期：导入即幂等（sha256 去重）并持久化元数据，支持列表/删除/清空
 - 错误语义：领域错误抛 RAGError 族，由 API 层映射状态码，不再吞错返回 success:false
+- 混合检索：hybrid = BM25 词法 + 向量语义 + RRF 融合（默认策略）
+- 语义缓存：查询→答案按用户作用域缓存，知识库变更事件失效 + TTL 兜底
 - 可测试性：组件可注入（configure_components），方便以 fake 替换真实后端
 """
 
@@ -16,6 +18,7 @@ from langchain_openai import ChatOpenAI
 
 from app.agents.base import BaseAgent
 from app.core.config import settings
+from app.rag.cache import SemanticCache
 from app.rag.document_processor import DocumentProcessor
 from app.rag.embedding_service import EmbeddingService
 from app.rag.exceptions import (
@@ -62,6 +65,12 @@ class RAGAgent(BaseAgent):
         config = config or {}
         self.retrieval_k = config.get("retrieval_k", settings.RAG_RETRIEVAL_K)
         self.search_type = config.get("search_type", settings.RAG_SEARCH_TYPE)
+        # 语义缓存（每用户作用域；知识库变更事件失效 + TTL 兜底）
+        self.semantic_cache = SemanticCache(
+            enabled=settings.RAG_CACHE_ENABLED,
+            ttl_seconds=settings.RAG_CACHE_TTL_SECONDS,
+            max_entries_per_user=settings.RAG_CACHE_MAX_ENTRIES_PER_USER,
+        )
 
         logger.info(
             "RAGAgent initialized",
@@ -184,6 +193,20 @@ class RAGAgent(BaseAgent):
         k = int(task_input.get("k", self.retrieval_k))
         search_type = task_input.get("search_type", self.search_type)
 
+        # 0. 语义缓存：命中直接返回（每用户作用域）
+        cache_key = None
+        if self.semantic_cache is not None:
+            cache_key = self.semantic_cache.make_key(user_id, query, k, search_type)
+            cached = self.semantic_cache.get(user_id, cache_key)
+            if cached is not None:
+                cached["cache"] = {
+                    "enabled": self.semantic_cache.enabled,
+                    "hit": True,
+                    "key": cache_key,
+                }
+                logger.info("RAG answer cache hit", user_id=str(user_id), query=query)
+                return cached
+
         # 1. 检索（仅该用户 collection）
         logger.info("Starting retrieval", user_id=str(user_id), query=query, k=k)
         retrieved_docs = await self.retriever.retrieve(
@@ -217,7 +240,27 @@ class RAGAgent(BaseAgent):
             ],
             "num_retrieved": len(retrieved_docs),
             "context_length": len(context),
+            "cache": {
+                "enabled": bool(self.semantic_cache and self.semantic_cache.enabled),
+                "hit": False,
+                "key": cache_key,
+            },
         }
+
+        # 4. 回填缓存（仅缓存可复现的快照字段，命中时再覆写 cache 状态）
+        if self.semantic_cache is not None and cache_key:
+            snapshot = {
+                key: result[key]
+                for key in (
+                    "success",
+                    "query",
+                    "answer",
+                    "retrieved_documents",
+                    "num_retrieved",
+                    "context_length",
+                )
+            }
+            self.semantic_cache.put(user_id, cache_key, snapshot)
 
         logger.info(
             "RAG execution completed",
@@ -225,6 +268,7 @@ class RAGAgent(BaseAgent):
             query_length=len(query),
             num_docs=len(retrieved_docs),
             answer_length=len(answer),
+            cache_hit=False,
         )
         return result
 
@@ -416,6 +460,10 @@ class RAGAgent(BaseAgent):
 
             results.append(item)
 
+        # 知识库已变更：使该用户语义缓存全部失效，避免陈旧答案
+        if num_ingested > 0:
+            self._invalidate_user_cache(user_id)
+
         logger.info(
             "Documents ingested (batch complete)",
             user_id=str(user_id),
@@ -494,6 +542,7 @@ class RAGAgent(BaseAgent):
             document_id=str(record.id),
             filename=record.filename,
         )
+        self._invalidate_user_cache(user_id)
         return {
             "deleted": True,
             "document_id": str(record.id),
@@ -509,6 +558,7 @@ class RAGAgent(BaseAgent):
         if db is not None:
             repo = self.document_repo or RAGDocumentRepository(db)
             deleted_count = await repo.delete_all_for_user(user_id)
+        self._invalidate_user_cache(user_id)
         return {"deleted": True, "user_id": str(user_id), "documents_deleted": deleted_count}
 
     async def get_knowledge_base_stats(self, user_id=None, db=None) -> Dict[str, Any]:
@@ -551,8 +601,15 @@ class RAGAgent(BaseAgent):
         return [
             "document_ingestion",
             "semantic_search",
+            "hybrid_search",  # BM25 + 向量 + RRF（默认策略）
             "question_answering",
             "context_augmentation",
             "knowledge_base_management",
             "tenant_isolation",
+            "semantic_cache",
         ]
+
+    def _invalidate_user_cache(self, user_id) -> None:
+        """知识库变更后使该用户语义缓存失效"""
+        if self.semantic_cache is not None:
+            self.semantic_cache.invalidate_user(user_id)

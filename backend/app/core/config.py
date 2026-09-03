@@ -82,7 +82,22 @@ class Settings:
     RAG_CHUNK_OVERLAP: int = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
     # 检索参数
     RAG_RETRIEVAL_K: int = int(os.getenv("RAG_RETRIEVAL_K", "5"))
-    RAG_SEARCH_TYPE: str = os.getenv("RAG_SEARCH_TYPE", "similarity")
+    # 默认检索策略: hybrid(BM25+向量+RRF) / similarity / mmr / score
+    RAG_SEARCH_TYPE: str = os.getenv("RAG_SEARCH_TYPE", "hybrid")
+    # --- Enterprise RAG (Phase 2): 混合检索 ---
+    # 词法 BM25 检索是否启用（hybrid 策略需要）
+    RAG_LEXICAL_ENABLED: bool = os.getenv("RAG_LEXICAL_ENABLED", "True").lower() == "true"
+    # 每路检索候选数 = k * 该系数（融合前各自放大召回）
+    RAG_HYBRID_FETCH_MULTIPLIER: int = int(os.getenv("RAG_HYBRID_FETCH_MULTIPLIER", "3"))
+    # RRF 常数（融合平滑系数，经典取值 60）
+    RAG_HYBRID_RRF_K: int = int(os.getenv("RAG_HYBRID_RRF_K", "60"))
+    # --- Enterprise RAG (Phase 2): 语义缓存 ---
+    # 是否缓存 查询→答案（每用户作用域）
+    RAG_CACHE_ENABLED: bool = os.getenv("RAG_CACHE_ENABLED", "True").lower() == "true"
+    # 缓存 TTL 兜底（秒；知识库变更时也会事件失效）
+    RAG_CACHE_TTL_SECONDS: int = int(os.getenv("RAG_CACHE_TTL_SECONDS", "3600"))
+    # 每用户缓存条目上限（LRU 裁剪）
+    RAG_CACHE_MAX_ENTRIES_PER_USER: int = int(os.getenv("RAG_CACHE_MAX_ENTRIES_PER_USER", "200"))
     # Embedding 后端: openai / huggingface
     RAG_EMBEDDING_MODEL_TYPE: str = os.getenv("RAG_EMBEDDING_MODEL_TYPE", "openai")
     RAG_EMBEDDING_MODEL_NAME: str = os.getenv("RAG_EMBEDDING_MODEL_NAME", "")

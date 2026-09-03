@@ -1,7 +1,7 @@
-"""语义检索器 - 租户作用域的文档检索（Enterprise RAG Phase 1）
+"""语义检索器 - 租户作用域的文档检索（Enterprise RAG Phase 1/2）
 
 - 所有检索方法都要求 user_id：向量查询只发生在该用户自己的 collection，杜绝跨租户泄漏
-- 支持的检索策略：similarity / mmr / score
+- 支持的检索策略：hybrid（默认，BM25+向量+RRF）/ similarity / score / mmr
 """
 
 from typing import Any, Dict, List, Optional
@@ -20,6 +20,7 @@ class SemanticRetriever:
     语义检索器（按用户租户隔离）
 
     提供检索策略：
+    - hybrid（默认）：BM25 词法 + 向量语义 双路召回 + RRF 融合
     - similarity：基础相似性搜索
     - score：带距离分数的相似性搜索
     - mmr：最大边际相关性搜索（相关性 + 多样性）
@@ -53,14 +54,21 @@ class SemanticRetriever:
             query: 查询文本
             user_id: 租户用户
             k: 返回结果数量
-            search_type: 'similarity' | 'mmr' | 'score'
+            search_type: 'hybrid' | 'similarity' | 'mmr' | 'score'
             filter_metadata: 元数据过滤（可附加，如指定单文档）
 
         Returns:
             相关文档列表
         """
         try:
-            if search_type == "similarity":
+            if search_type == "hybrid":
+                results = await self.vector_store.hybrid_search(
+                    user_id=user_id,
+                    query=query,
+                    k=k,
+                    filter_metadata=filter_metadata,
+                )
+            elif search_type == "similarity":
                 results = await self.vector_store.similarity_search(
                     user_id=user_id,
                     query=query,
@@ -122,4 +130,4 @@ class SemanticRetriever:
 
     def get_retrieval_strategies(self) -> List[str]:
         """实际支持的检索策略（与实现严格一致）"""
-        return ["similarity", "score", "mmr"]
+        return ["hybrid", "similarity", "score", "mmr"]

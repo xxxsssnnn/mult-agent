@@ -49,7 +49,7 @@ class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000, description="查询内容")
     k: Optional[int] = Field(None, ge=1, le=50, description="返回结果数量")
     search_type: Optional[str] = Field(
-        None, pattern="^(similarity|mmr|score)$", description="检索策略"
+        None, pattern="^(hybrid|similarity|mmr|score)$", description="检索策略"
     )
 
 
@@ -360,7 +360,7 @@ async def demo_rag_feature(
         task_input = {
             "query": query or "什么是检索增强生成？",
             "k": k,
-            "search_type": "similarity",
+            "search_type": "hybrid",
         }
         result = await rag_agent.execute(task_input, user_id=current_user.id)
         result["demo_info"] = {

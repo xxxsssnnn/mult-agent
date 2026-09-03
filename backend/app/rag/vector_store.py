@@ -19,6 +19,8 @@ from langchain_community.vectorstores import Chroma
 from app.core.config import settings
 from app.rag.embedding_service import EmbeddingService
 from app.rag.exceptions import RAGBackendError
+from app.rag.fusion import reciprocal_rank_fusion
+from app.rag.lexical import LexicalIndex
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -62,6 +64,8 @@ class VectorStoreManager:
         self._lock = asyncio.Lock()
         # 每用户 langchain wrapper 缓存
         self._wrappers: Dict[str, Chroma] = {}
+        # 每用户词法索引（BM25，与向量层同步维护；重启后首次 hybrid 查询懒重建）
+        self.lexical = LexicalIndex()
 
         if self.chroma_client is None:
             try:
@@ -148,21 +152,30 @@ class VectorStoreManager:
 
         async with self._lock:
             wrapper = self._wrapper(collection_name)
-            ids = [str(uuid4()) for _ in chunks]
-            metadatas = []
+            # 为每条切块生成稳定的 chunk_id（混合检索 RRF 对齐锚点），
+            # 并注入租户/文档归属元数据后统一入库与同步词法索引
+            ids: List[str] = []
+            merged_docs: List[Document] = []
             for chunk in chunks:
+                chunk_id = str(uuid4())
                 md = dict(chunk.metadata or {})
                 md.update(base_metadata or {})
                 md["user_id"] = str(user_id)
                 md["doc_id"] = str(doc_id)
                 md["collection"] = collection_name
-                metadatas.append(md)
+                md["chunk_id"] = chunk_id
+                ids.append(chunk_id)
+                merged_docs.append(Document(page_content=chunk.page_content, metadata=md))
 
             def _add() -> None:
-                wrapper.add_documents(documents=chunks, ids=ids, metadatas=metadatas)
+                wrapper.add_documents(documents=merged_docs, ids=ids)
 
             try:
                 await asyncio.to_thread(_add)
+                # 向量写入成功后同步词法层，保证两路索引一致
+                await asyncio.to_thread(
+                    self.lexical.add_document, user_id, doc_id, ids, merged_docs
+                )
             except Exception as e:
                 logger.error(
                     "Failed to add chunks to vector store",
@@ -192,6 +205,7 @@ class VectorStoreManager:
             try:
                 collection = self.chroma_client.get_collection(name=collection_name)
                 collection.delete(where={"doc_id": str(doc_id)})
+                self.lexical.remove_document(user_id, doc_id)
                 logger.info(
                     "Document chunks deleted",
                     collection=collection_name,
@@ -217,6 +231,7 @@ class VectorStoreManager:
                     self.chroma_client.delete_collection, name=collection_name
                 )
                 self._wrappers.pop(collection_name, None)
+                self.lexical.clear_user(user_id)
                 logger.info("User collection deleted", collection=collection_name)
                 return True
             except Exception as e:
@@ -297,6 +312,135 @@ class VectorStoreManager:
                 logger.error("MMR search failed", collection=collection_name, error=str(e))
                 raise RAGBackendError(f"MMR search failed: {e}") from e
             return results
+
+    async def hybrid_search(
+        self,
+        user_id,
+        query: str,
+        k: int = 5,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Document]:
+        """混合检索：BM25 词法路 + 向量语义路 + RRF 融合（仅限该用户 collection）。
+
+        词法索引优先与写入同步维护；进程重启后首次查询从 Chroma 懒重建，
+        保证 hybrid 长期可用而不依赖"再次 ingest 触发重建"。
+        """
+        collection_name = _collection_name_for(user_id)
+
+        async with self._lock:
+            wrapper = self._wrapper(collection_name)
+            self._ensure_lexical_loaded(user_id)
+
+            fetch_k = max(k * settings.RAG_HYBRID_FETCH_MULTIPLIER, k)
+            rrf_k = settings.RAG_HYBRID_RRF_K
+            doc_id_filter = (filter_metadata or {}).get("doc_id")
+
+            def _semantic() -> List[Document]:
+                kwargs: Dict[str, Any] = {"k": fetch_k}
+                if filter_metadata:
+                    kwargs["filter"] = filter_metadata
+                return wrapper.similarity_search(query=query, **kwargs)
+
+            try:
+                semantic_docs = await asyncio.to_thread(_semantic)
+                lexical_docs: List[Document] = []
+                if settings.RAG_LEXICAL_ENABLED:
+                    lexical_docs = await asyncio.to_thread(
+                        self.lexical.search,
+                        user_id,
+                        query,
+                        max(fetch_k, k),
+                        doc_id_filter,
+                    )
+            except Exception as e:
+                logger.error("Hybrid search failed", collection=collection_name, error=str(e))
+                raise RAGBackendError(f"Hybrid search failed: {e}") from e
+
+            fused = self._fuse_rankings(semantic_docs, lexical_docs, k, rrf_k)
+            logger.debug(
+                "Hybrid search completed",
+                collection=collection_name,
+                num_results=len(fused),
+                k=k,
+                semantic_hits=len(semantic_docs),
+                lexical_hits=len(lexical_docs),
+            )
+            return fused
+
+    # ------------------------------------------------------------------ #
+    # 词法索引懒加载与融合
+    # ------------------------------------------------------------------ #
+
+    def _ensure_lexical_loaded(self, user_id) -> None:
+        """进程重启后词法索引为空：首次 hybrid 查询时从 Chroma 重建（持锁调用）。"""
+        if self.lexical.is_loaded(user_id):
+            return
+        collection_name = _collection_name_for(user_id)
+        if not self._has_collection(collection_name):
+            return
+        try:
+            collection = self.chroma_client.get_collection(name=collection_name)
+            data = collection.get(include=["documents", "metadatas"])
+            ids = data.get("ids") or []
+            documents = data.get("documents") or []
+            metadatas = data.get("metadatas") or []
+            if not ids:
+                self.lexical.mark_loaded(user_id)
+                return
+            chunks = [
+                Document(page_content=documents[i], metadata=metadatas[i] or {})
+                for i in range(len(ids))
+            ]
+            self.lexical.add_all(user_id, ids, chunks)
+            logger.info(
+                "Lexical index rebuilt from collection",
+                collection=collection_name,
+                num_chunks=len(ids),
+            )
+        except Exception as e:
+            # 重建失败不阻断检索：hybrid 降级为纯语义路
+            logger.warning(
+                "Failed to rebuild lexical index, degrading to semantic only",
+                collection=collection_name,
+                error=str(e),
+            )
+
+    def _fuse_rankings(
+        self,
+        semantic_docs: List[Document],
+        lexical_docs: List[Document],
+        k: int,
+        rrf_k: int,
+    ) -> List[Document]:
+        """RRF 融合两路结果（以 chunk_id 对齐；缺 chunk_id 时降级纯语义路）。"""
+        if not lexical_docs:
+            return semantic_docs[:k]
+        doc_by_id: Dict[str, Document] = {}
+        semantic_ids: List[str] = []
+        for doc in semantic_docs:
+            cid = (doc.metadata or {}).get("chunk_id")
+            if not cid:
+                # 旧数据无 chunk_id，无法对齐融合：按文档顺序拼接降级
+                return (semantic_docs + lexical_docs)[:k]
+            semantic_ids.append(cid)
+            doc_by_id[cid] = doc
+        lexical_ids: List[str] = []
+        for doc in lexical_docs:
+            cid = (doc.metadata or {}).get("chunk_id")
+            if not cid:
+                continue
+            lexical_ids.append(cid)
+            doc_by_id.setdefault(cid, doc)
+
+        fused = reciprocal_rank_fusion([semantic_ids, lexical_ids], rrf_k)
+        ranked_docs: List[Document] = []
+        for cid, _score in fused:
+            doc = doc_by_id.get(cid)
+            if doc is not None:
+                ranked_docs.append(doc)
+            if len(ranked_docs) >= k:
+                break
+        return ranked_docs
 
     # ------------------------------------------------------------------ #
     # 统计

@@ -44,10 +44,12 @@ class CodeReviewState(TypedDict):
 class CodeReviewWorkflow(BaseWorkflow):
     """代码生成与审查工作流"""
     
-    def __init__(self, coder_agent: CoderAgent, reviewer_agent: ReviewerAgent, max_iterations: int = 3):
+    def __init__(self, coder_agent: CoderAgent, reviewer_agent: ReviewerAgent,
+                 max_iterations: int = 3, memory_manager=None):
         super().__init__(
             name="code_review_workflow",
-            description="Automated code generation and review workflow"
+            description="Automated code generation and review workflow",
+            memory_manager=memory_manager
         )
         self.coder_agent = coder_agent
         self.reviewer_agent = reviewer_agent
@@ -88,7 +90,7 @@ class CodeReviewWorkflow(BaseWorkflow):
         """生成代码"""
         logger.info("Generating code", requirement=state["requirement"])
         
-        result = await self.coder_agent.execute({
+        result = await self.coder_agent.execute_with_memory({
             "requirement": state["requirement"],
             "language": state["language"],
             "context": f"Iteration {state.get('iteration_count', 0) + 1}"
@@ -112,7 +114,7 @@ class CodeReviewWorkflow(BaseWorkflow):
             state["approved"] = False
             return state
         
-        result = await self.reviewer_agent.execute({
+        result = await self.reviewer_agent.execute_with_memory({
             "code": state["generated_code"],
             "language": state["language"],
             "focus_areas": ["quality", "security", "performance"]
@@ -260,7 +262,7 @@ Previous review feedback:
 Please improve the code based on this feedback.
 """
         
-        result = await self.coder_agent.execute({
+        result = await self.coder_agent.execute_with_memory({
             "requirement": state["requirement"],
             "language": state["language"],
             "context": context
@@ -290,6 +292,12 @@ Please improve the code based on this feedback.
         while retry_count < self.max_retries:
             try:
                 logger.info("Starting code review workflow", attempt=retry_count + 1)
+                
+                # 会话记忆：构造注入或 initial_state["memory"] 配置
+                memory = await self.ensure_memory(initial_state)
+                if memory is not None:
+                    await self.coder_agent.attach_memory(memory)
+                    await self.reviewer_agent.attach_memory(memory)
                 
                 # 初始化状态
                 state = CodeReviewState(
@@ -321,6 +329,14 @@ Please improve the code based on this feedback.
                     iterations=result.get("iteration_count")
                 )
                 
+                metadata = {
+                    "attempt": retry_count + 1,
+                    "has_structured_review": result.get("structured_review") is not None
+                }
+                memory_meta = self.memory_info()
+                if memory_meta:
+                    metadata["memory"] = memory_meta
+                
                 return {
                     "success": True,
                     "code": result.get("generated_code", ""),
@@ -328,10 +344,7 @@ Please improve the code based on this feedback.
                     "structured_review": result.get("structured_review"),
                     "approved": result.get("approved", False),
                     "iterations": result.get("iteration_count", 0),
-                    "metadata": {
-                        "attempt": retry_count + 1,
-                        "has_structured_review": result.get("structured_review") is not None
-                    }
+                    "metadata": metadata
                 }
             
             except Exception as e:

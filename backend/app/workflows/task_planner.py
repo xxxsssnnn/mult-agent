@@ -35,10 +35,11 @@ class TaskPlanState(TypedDict):
 class TaskPlannerWorkflow(BaseWorkflow):
     """任务规划与执行工作流"""
     
-    def __init__(self, max_iterations: int = 3):
+    def __init__(self, max_iterations: int = 3, memory_manager=None):
         super().__init__(
             name="task_planner_workflow",
-            description="Break down complex tasks and execute them sequentially with intelligent planning"
+            description="Break down complex tasks and execute them sequentially with intelligent planning",
+            memory_manager=memory_manager
         )
         self.max_iterations = max_iterations
         self.llm = None
@@ -348,8 +349,10 @@ class TaskPlannerWorkflow(BaseWorkflow):
             
             coder = CoderAgent(agent_id=uuid4(), name=f"TaskCoder-{task['id']}")
             await coder.initialize()
+            if self.memory_manager is not None:
+                await coder.attach_memory(self.memory_manager)
             
-            result = await coder.execute({
+            result = await coder.execute_with_memory({
                 "requirement": description,
                 "language": "python",
                 "context": f"Previous work:\n{context}" if context else ""
@@ -373,8 +376,10 @@ class TaskPlannerWorkflow(BaseWorkflow):
             
             reviewer = ReviewerAgent(agent_id=uuid4(), name=f"TaskReviewer-{task['id']}")
             await reviewer.initialize()
+            if self.memory_manager is not None:
+                await reviewer.attach_memory(self.memory_manager)
             
-            result = await reviewer.execute({
+            result = await reviewer.execute_with_memory({
                 "code": code_to_review,
                 "language": "python",
                 "focus_areas": ["quality", "security", "performance"]
@@ -535,6 +540,9 @@ class TaskPlannerWorkflow(BaseWorkflow):
             try:
                 logger.info("Starting task planner workflow", attempt=retry_count + 1)
                 
+                # 会话记忆：构造注入或 initial_state["memory"] 配置
+                await self.ensure_memory(initial_state)
+                
                 # 初始化状态
                 state = TaskPlanState(
                     user_input=initial_state.get("user_input", ""),
@@ -559,17 +567,22 @@ class TaskPlannerWorkflow(BaseWorkflow):
                 
                 logger.info("Workflow completed successfully", status=result["status"])
                 
+                metadata = {
+                    "total_tasks": len(result["tasks"]),
+                    "completed_tasks": len([t for t in result["tasks"] if t["status"] == "completed"]),
+                    "failed_tasks": len([t for t in result["tasks"] if t["status"] == "failed"]),
+                    "attempt": retry_count + 1
+                }
+                memory_meta = self.memory_info()
+                if memory_meta:
+                    metadata["memory"] = memory_meta
+                
                 return {
                     "success": True,
                     "tasks": result["tasks"],
                     "results": result["results"],
                     "status": result["status"],
-                    "metadata": {
-                        "total_tasks": len(result["tasks"]),
-                        "completed_tasks": len([t for t in result["tasks"] if t["status"] == "completed"]),
-                        "failed_tasks": len([t for t in result["tasks"] if t["status"] == "failed"]),
-                        "attempt": retry_count + 1
-                    }
+                    "metadata": metadata
                 }
             
             except Exception as e:

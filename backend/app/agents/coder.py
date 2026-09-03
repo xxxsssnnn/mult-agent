@@ -52,6 +52,7 @@ class CoderAgent(BaseAgent):
             requirement = task_input.get("requirement", "")
             language = task_input.get("language", "python")
             context = task_input.get("context", "")
+            memory_context = task_input.get("memory_context", "")
             
             if not self.llm:
                 # Mock响应
@@ -62,11 +63,16 @@ class CoderAgent(BaseAgent):
                     "explanation": "Mock response - LLM not configured"
                 }
             
-            prompt = f"""
-语言: {language}
+            memory_note = ""
+            if memory_context:
+                memory_note = (
+                    "\n历史会话记忆参考（与本需求无关请忽略）：\n"
+                    f"{memory_context}\n"
+                )
+            
+            prompt = f"""语言: {language}
 上下文: {context}
-
-需求: {requirement}
+{memory_note}需求: {requirement}
 
 请生成符合要求的代码，并解释关键设计决策。
 """

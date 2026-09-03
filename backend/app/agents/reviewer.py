@@ -53,6 +53,7 @@ class ReviewerAgent(BaseAgent):
             code = task_input.get("code", "")
             language = task_input.get("language", "python")
             focus_areas = task_input.get("focus_areas", ["quality", "security", "performance"])
+            memory_context = task_input.get("memory_context", "")
             
             if not self.llm:
                 return {
@@ -62,11 +63,17 @@ class ReviewerAgent(BaseAgent):
                     "score": 85
                 }
             
+            memory_note = ""
+            if memory_context:
+                memory_note = (
+                    "\n历史会话记忆参考（供判断代码演化与历史背景）：\n"
+                    f"{memory_context}\n"
+                )
+            
             prompt = f"""
 语言: {language}
 关注领域: {', '.join(focus_areas)}
-
-代码:
+{memory_note}代码:
 ```{language}
 {code}
 ```

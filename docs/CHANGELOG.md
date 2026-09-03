@@ -5,6 +5,54 @@
 
 ---
 
+## 2026-09-03 RAG 文档级持久化 + 多租户文档管理 API
+
+**提交**：`a482e58`
+
+**改了什么**：
+- 新增模型 `RAGDocument`（表 `rag_documents`）与迁移 `0004`：文档级元数据持久化（user_id / filename / file_type / sha256 checksum / chunk_count / collection_name / status / error_message），`(user_id, checksum)` 唯一约束支撑幂等导入
+- 新增 `backend/app/rag/repository.py`：文档记录仓储层（幂等查找 / 创建 / 列表 / 按用户删除），数据访问集中化，便于测试注入
+- `backend/app/core/config.py`：新增 `RAG_*` 配置段（持久化目录、collection 前缀、切块/检索参数、Embedding 后端、上传大小与扩展名白名单、分页大小），消除硬编码
+- `backend/app/api/rag.py` 重写：新增 `GET /documents`（分页列表）与 `DELETE /documents/{id}`（删除单文档：向量切块 + 元数据记录），`DELETE /clear` 与 `GET /stats` 改为按用户作用域；上传安全落盘（uuid 文件名防路径穿越）、扩展名白名单（415）、大小上限（413）、领域异常统一映射明确状态码
+- `backend/tests/test_rag_enterprise.py`（27 项断言）：多租户隔离 / 幂等导入 / 文档管理作用域 / 强制 user_id / 跨租户检索内容级验证
+- `backend/tests/test_migrations.py`：head 推进 `0004`，新增 `rag_documents` 表/索引/唯一约束断言
+- `backend/examples/rag_demo.py`：适配多租户接口
+- `run_tests.ps1`：纳入 `test_rag_enterprise.py`
+
+**为什么这么改**：
+- 旧实现中 `ingest` 结果只活在 Chroma 本地文件，无任何业务持久化——没有文档清单、无法做文档级删除/权限/审计，也无法幂等（同文档重复导入产生重复向量）
+- 文档级管理是"能不能上生产"的红线之一：没有它，多租户隔离只解决了读取边界，管理面（删除/清空/审计）无从谈起
+
+**解决了什么问题**：
+- 文档级生命周期闭环：上传 → 列表 → 删除单文档 → 清空，全部按当前登录用户作用域生效
+- 幂等导入：重复上传相同内容自动跳过（`skipped_duplicate`），杜绝知识库膨胀
+- 错误语义透明：文件类型/大小/越权删除等场景返回明确 HTTP 状态码，不再"吞错返回 200"
+
+---
+
+## 2026-09-03 RAG 多租户隔离 + 异步安全向量库
+
+**提交**：`3c3ac82`
+
+**改了什么**：
+- `backend/app/rag/vector_store.py` 重构：从"全局单 collection"改为**每用户独立 Chroma collection**（`rag_{user_id_hex}`，前缀见 `RAG_COLLECTION_PREFIX`）；全部同步 Chroma 调用经 `asyncio.to_thread` + 内部锁串行化；切块元数据携带 `user_id / doc_id / collection` 支持按文档整删；后端不可用统一抛 `RAGBackendError`
+- `backend/app/rag/retriever.py`：所有检索方法强制携带 `user_id`，只查该用户自己的 collection（物理隔离）
+- `backend/app/rag/rag_agent.py` 重构：`execute/ingest_documents/list_documents/delete_document/delete_all_documents` 全部以 `user_id` 为租户边界（缺失即拒绝）；新增 `configure_components` 支持测试注入；文档导入按 sha256 幂等并持久化元数据
+- 新增 `backend/app/rag/exceptions.py`：领域异常族（UnsupportedFileTypeError / FileTooLargeError / EmptyDocumentError / DocumentNotFoundError / RAGBackendError）
+- `backend/tests/test_rag_enterprise.py`（27 项断言）与本记录配套（多租户隔离与幂等部分）
+
+**为什么这么改**：
+- 旧实现所有用户共享同一个 `rag_default` collection——**任何用户都能检索到任何用户上传的文档**，检索层完全没有租户边界（安全事件级缺陷）
+- 旧 `VectorStoreManager` 绑定单一 collection，同步 Chroma 调用直接阻塞 async 事件循环
+- 旧 `RAGAgent.execute` 无 `user_id` 约束，"无租户上下文也可检索"是数据泄漏的根源
+
+**解决了什么问题**：
+- 多租户数据隔离从"检索时过滤"升级为"collection 物理隔离"，缺 filter 也不会串库
+- 检索/写入全程不阻塞事件循环；并发操作被内部锁串行化，避免 Chroma 客户端竞态
+- 未携带 `user_id` 的任何 RAG 操作被硬性拒绝，杜绝"无主检索"路径
+
+---
+
 ## 2026-09-02 Celery worker 启动注册 memory 任务（接线修复）
 
 **提交**：`791de3c`

@@ -30,7 +30,8 @@ $tests = @(
     "tests\test_rag_hybrid_cache.py",
     "tests\test_rag_reranker.py",
     "tests\test_rag_query_transform.py",
-    "tests\test_rag_eval.py"
+    "tests\test_rag_eval.py",
+    "tests\test_workflow_memory.py"
 )
 
 $failed = @()

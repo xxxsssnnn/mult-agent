@@ -405,6 +405,10 @@ async def get_rag_info(
                 "vector_store": "ChromaDB (tenant-aware)",
                 "retriever": "Semantic Retriever (hybrid / similarity / score / mmr)",
                 "reranker": f"LLM two-stage reranker (enabled={rag_agent.rerank_enabled})",
+                "query_transformer": (
+                    f"LLM multi-query expansion (enabled={rag_agent.transform_enabled}, "
+                    f"variants={rag_agent.transform_num_variants})"
+                ),
                 "llm": "OpenAI GPT (if configured)",
                 "document_registry": "SQLAlchemy RAGDocument (persistence + idempotency)",
             },
@@ -413,6 +417,12 @@ async def get_rag_info(
                 "candidate_multiplier": rag_agent.rerank_candidate_multiplier,
                 "max_candidates": rag_agent.rerank_max_candidates,
                 "note": "Stage-2 LLM pointwise scoring; effective when LLM is configured.",
+            },
+            "query_transformation": {
+                "enabled": rag_agent.transform_enabled,
+                "num_variants": rag_agent.transform_num_variants,
+                "min_query_len": settings.RAG_TRANSFORM_MIN_QUERY_LEN,
+                "note": "LLM rewrites the query into variants; each is recalled then RRF-merged. Effective when LLM is configured and query length >= min_query_len.",
             },
             "capabilities": rag_agent.get_capabilities(),
             "supported_file_types": settings.RAG_ALLOWED_EXTENSIONS,

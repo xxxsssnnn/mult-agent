@@ -1,4 +1,4 @@
-"""RAG Agent - 多租户检索增强生成 Agent（Enterprise RAG Phase 1/2）
+"""RAG Agent - 多租户检索增强生成 Agent（Enterprise RAG Phase 1/2/3/4）
 
 企业级改造要点：
 - 租户隔离：execute/检索强制 user_id（缺失即拒绝），向量操作限定在用户自己的 collection
@@ -6,6 +6,8 @@
 - 错误语义：领域错误抛 RAGError 族，由 API 层映射状态码，不再吞错返回 success:false
 - 混合检索：hybrid = BM25 词法 + 向量语义 + RRF 融合（默认策略）
 - 语义缓存：查询→答案按用户作用域缓存，知识库变更事件失效 + TTL 兜底
+- 查询转换（Phase 4）：LLM 多查询扩展，多变体召回后 RRF 融合，覆盖单查询漏检
+- 两阶段重排（Phase 3）：先放大召回，再 LLM 点级打分截断到 top-k
 - 可测试性：组件可注入（configure_components），方便以 fake 替换真实后端
 """
 
@@ -20,6 +22,7 @@ from app.agents.base import BaseAgent
 from app.core.config import settings
 from app.rag.cache import SemanticCache
 from app.rag.document_processor import DocumentProcessor
+from app.rag.query_transformer import LLMQueryTransformer
 from app.rag.reranker import LLMReranker
 from app.rag.embedding_service import EmbeddingService
 from app.rag.exceptions import (
@@ -88,6 +91,21 @@ class RAGAgent(BaseAgent):
             max_doc_chars=settings.RAG_RERANK_MAX_DOC_CHARS,
         )
 
+        # 查询转换（Phase 4）：LLM 多查询扩展。开关默认开，但仅当装配了
+        # LLM 且查询长度达标时才真正生效（见 LLMQueryTransformer.active）
+        self.transform_enabled = config.get(
+            "transform_enabled", settings.RAG_TRANSFORM_ENABLED
+        )
+        self.transform_num_variants = config.get(
+            "transform_num_variants", settings.RAG_TRANSFORM_NUM_VARIANTS
+        )
+        self.transformer: Optional[LLMQueryTransformer] = LLMQueryTransformer(
+            llm=None,
+            enabled=self.transform_enabled,
+            num_variants=self.transform_num_variants,
+            min_query_len=settings.RAG_TRANSFORM_MIN_QUERY_LEN,
+        )
+
         logger.info(
             "RAGAgent initialized",
             agent_id=str(agent_id),
@@ -95,6 +113,7 @@ class RAGAgent(BaseAgent):
             retrieval_k=self.retrieval_k,
             search_type=self.search_type,
             rerank_enabled=self.rerank_enabled,
+            transform_enabled=self.transform_enabled,
         )
 
     # ------------------------------------------------------------------ #
@@ -141,8 +160,9 @@ class RAGAgent(BaseAgent):
                 )
                 self.llm = None
 
-            # 重排器共享同一 LLM（未配置时 active=False，重排自动旁路）
+            # 重排器 / 转换器共享同一 LLM（未配置时 active=False，自动旁路）
             self.reranker.llm = self.llm
+            self.transformer.llm = self.llm
             self.is_initialized = True
             logger.info("RAGAgent initialized successfully")
             return True
@@ -171,9 +191,11 @@ class RAGAgent(BaseAgent):
                 setattr(self, name, components[name])
         if self.vector_store and self.retriever is None:
             self.retriever = SemanticRetriever(vector_store=self.vector_store)
-        # 重排器跟随注入的 LLM（测试注入 llm=Mock 后重排自动启用）
+        # 重排器 / 转换器跟随注入的 LLM（测试注入 llm=Mock 后自动启用）
         if self.reranker is not None:
             self.reranker.llm = self.llm
+        if self.transformer is not None:
+            self.transformer.llm = self.llm
 
     async def _ensure_ready(self) -> None:
         if not self.is_initialized:
@@ -215,9 +237,12 @@ class RAGAgent(BaseAgent):
         k = int(task_input.get("k", self.retrieval_k))
         search_type = task_input.get("search_type", self.search_type)
         rerank_on = self._rerank_active()
+        transform_on = self._transform_active() and len(query) >= (
+            self.transformer.min_query_len if self.transformer is not None else 0
+        )
 
         # 0. 语义缓存：命中直接返回（每用户作用域）。
-        #    key 区分是否走重排：不同管道产出不同答案，不能互相复用
+        #    key 区分管道差异（重排 / 查询转换）：不同管道产出不同答案，不能互相复用
         cache_key = None
         if self.semantic_cache is not None:
             cache_key = self.semantic_cache.make_key(
@@ -225,7 +250,14 @@ class RAGAgent(BaseAgent):
                 query,
                 k,
                 search_type,
-                extra="rerank" if rerank_on else "",
+                extra="|".join(
+                    tag
+                    for tag in (
+                        "rerank" if rerank_on else "",
+                        "transform" if transform_on else "",
+                    )
+                    if tag
+                ),
             )
             cached = self.semantic_cache.get(user_id, cache_key)
             if cached is not None:
@@ -237,13 +269,20 @@ class RAGAgent(BaseAgent):
                 logger.info("RAG answer cache hit", user_id=str(user_id), query=query)
                 return cached
 
-        # 1. 第一阶段召回（仅该用户 collection）。
+        # 1. 查询转换（Phase 4）：LLM 多查询扩展。
+        #    变体列表恒以原文开头（基线召回不劣化）；未启用时即 [query]
+        transform_variants = [query]
+        if transform_on:
+            transform_variants = await self.transformer.transform(query)
+
+        # 2. 第一阶段召回（仅该用户 collection）。
         #    重排开启时放大候选数留足重排空间；关闭时与最终 k 一致，行为不变
         stage1_k = (
             min(k * self.rerank_candidate_multiplier, self.rerank_max_candidates)
             if rerank_on
             else k
         )
+        variant_count = len(transform_variants)
         logger.info(
             "Starting retrieval (stage 1 recall)",
             user_id=str(user_id),
@@ -252,10 +291,27 @@ class RAGAgent(BaseAgent):
             stage1_k=stage1_k,
             search_type=search_type,
             rerank=rerank_on,
+            query_transform=variant_count > 1,
+            variant_count=variant_count,
         )
-        retrieved_docs = await self.retriever.retrieve(
-            query=query, user_id=user_id, k=stage1_k, search_type=search_type
-        )
+        if variant_count > 1:
+            # 多变体：每路独立召回，RRF 融合去重（同一片段多路命中只算一次）
+            per_variant_k = max(1, int(stage1_k / variant_count))
+            variant_lists: List[List[Document]] = []
+            for variant in transform_variants:
+                variant_lists.append(
+                    await self.retriever.retrieve(
+                        query=variant,
+                        user_id=user_id,
+                        k=per_variant_k,
+                        search_type=search_type,
+                    )
+                )
+            retrieved_docs = self._rrf_merge_variants(variant_lists, top=stage1_k)
+        else:
+            retrieved_docs = await self.retriever.retrieve(
+                query=query, user_id=user_id, k=stage1_k, search_type=search_type
+            )
         stage1_count = len(retrieved_docs)
 
         # 2. 第二阶段重排：LLM 打分排序并截断到 top-k（失败自动降级原序）
@@ -302,6 +358,11 @@ class RAGAgent(BaseAgent):
             ],
             "num_retrieved": len(retrieved_docs),
             "context_length": len(context),
+            "transformation": {
+                "enabled": transform_on,
+                "variants": transform_variants,
+                "variant_count": len(transform_variants),
+            },
             "rerank": {
                 "enabled": rerank_on,
                 "candidates": stage1_count,
@@ -326,6 +387,7 @@ class RAGAgent(BaseAgent):
                     "retrieved_documents",
                     "num_retrieved",
                     "context_length",
+                    "transformation",
                     "rerank",
                 )
             }
@@ -337,6 +399,7 @@ class RAGAgent(BaseAgent):
             query_length=len(query),
             num_docs=len(retrieved_docs),
             answer_length=len(answer),
+            query_variants=variant_count,
             cache_hit=False,
         )
         return result
@@ -677,6 +740,7 @@ class RAGAgent(BaseAgent):
             "tenant_isolation",
             "semantic_cache",
             "reranking",  # 两阶段重排（LLM 点级，需配置 LLM 生效）
+            "query_transformation",  # 查询转换（LLM 多查询扩展，需配置 LLM 生效）
         ]
 
     def _rerank_active(self) -> bool:
@@ -686,6 +750,44 @@ class RAGAgent(BaseAgent):
             and self.reranker.active
             and self.reranker.llm is not None
         )
+
+    def _transform_active(self) -> bool:
+        """查询转换是否在本 Agent 真正参与链路"""
+        return bool(self.transformer is not None and self.transformer.active)
+
+    @staticmethod
+    def _doc_merge_key(doc: Document) -> str:
+        """跨查询变体召回结果的去重身份：优先 chunk_id，缺失时用内容摘要"""
+        chunk_id = (doc.metadata or {}).get("chunk_id")
+        if chunk_id:
+            return f"chunk:{chunk_id}"
+        import hashlib
+
+        return "hash:" + hashlib.sha1(
+            (doc.page_content or "").encode("utf-8")
+        ).hexdigest()
+
+    def _rrf_merge_variants(
+        self,
+        variant_lists: List[List[Document]],
+        top: int,
+    ) -> List[Document]:
+        """多查询变体召回结果的 RRF 融合 + 去重。
+
+        同一片段在多个变体下命中 → 得分叠加（提升召回鲁棒性）；
+        排序稳定：同分保持先到顺序；返回前 top 个。
+        """
+        rrf_k = settings.RAG_HYBRID_RRF_K
+        scores: Dict[str, float] = {}
+        first_seen: Dict[str, Document] = {}
+        for ranked in variant_lists:
+            for rank, doc in enumerate(ranked):
+                key = self._doc_merge_key(doc)
+                if key not in first_seen:
+                    first_seen[key] = doc
+                scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+        ordered_keys = sorted(first_seen.keys(), key=scores.get, reverse=True)[:top]
+        return [first_seen[key] for key in ordered_keys]
 
     def _invalidate_user_cache(self, user_id) -> None:
         """知识库变更后使该用户语义缓存失效"""

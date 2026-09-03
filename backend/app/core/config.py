@@ -107,6 +107,13 @@ class Settings:
     RAG_RERANK_MAX_CANDIDATES: int = int(os.getenv("RAG_RERANK_MAX_CANDIDATES", "30"))
     # 重排 prompt 中单文档内容截断长度
     RAG_RERANK_MAX_DOC_CHARS: int = int(os.getenv("RAG_RERANK_MAX_DOC_CHARS", "600"))
+    # --- Enterprise RAG (Phase 4): 查询转换（LLM 多查询扩展） ---
+    # 是否用 LLM 把用户问题改写为多个检索变体。仅 LLM 就绪且查询足够长时生效
+    RAG_TRANSFORM_ENABLED: bool = os.getenv("RAG_TRANSFORM_ENABLED", "True").lower() == "true"
+    # 每查询检索变体总数（含原文；越大覆盖越好但检索与 LLM 成本线性上升）
+    RAG_TRANSFORM_NUM_VARIANTS: int = int(os.getenv("RAG_TRANSFORM_NUM_VARIANTS", "3"))
+    # 短于该长度的查询不做转换（避免噪音与成本，保证短查询行为与旧版一致）
+    RAG_TRANSFORM_MIN_QUERY_LEN: int = int(os.getenv("RAG_TRANSFORM_MIN_QUERY_LEN", "8"))
     # Embedding 后端: openai / huggingface
     RAG_EMBEDDING_MODEL_TYPE: str = os.getenv("RAG_EMBEDDING_MODEL_TYPE", "openai")
     RAG_EMBEDDING_MODEL_NAME: str = os.getenv("RAG_EMBEDDING_MODEL_NAME", "")

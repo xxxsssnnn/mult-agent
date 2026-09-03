@@ -1,4 +1,4 @@
-# 记忆系统一键回归测试
+# 项目一键回归测试（记忆 / RAG / 迁移）
 # 用法: powershell -ExecutionPolicy Bypass -File run_tests.ps1
 # 任一测试套件失败时整体退出码非 0，可用于 CI。
 $ErrorActionPreference = "Continue"
@@ -26,7 +26,8 @@ $tests = @(
     "tests\test_migrations.py",
     "tests\test_memory_decay_expiry.py",
     "tests\test_celery_registration.py",
-    "tests\test_rag_enterprise.py"
+    "tests\test_rag_enterprise.py",
+    "tests\test_rag_hybrid_cache.py"
 )
 
 $failed = @()

@@ -104,6 +104,10 @@ class FakeVectorStore:
     async def max_marginal_relevance_search(self, user_id, query, k=5, fetch_k=20):
         return await self.similarity_search(user_id, query, k)
 
+    async def hybrid_search(self, user_id, query, k=5, filter_metadata=None):
+        # Fake 无词法层：hybrid 视同语义路（隔离语义不变）
+        return await self.similarity_search(user_id, query, k, filter_metadata)
+
     async def delete_document_chunks(self, user_id, doc_id):
         bucket = self.by_user.get(str(user_id), {})
         if str(doc_id) in bucket:

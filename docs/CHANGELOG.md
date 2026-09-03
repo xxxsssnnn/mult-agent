@@ -31,6 +31,40 @@
 
 ---
 
+## 2026-09-03 RAG 语义缓存升级（真·语义命中层）
+
+**提交**：`8a5b9f6`（配套测试 `2af31b4`）
+
+**改了什么**：
+- `rag/cache.py`：原 `SemanticCache` 实为**逐字精确哈希**缓存，升级为「精确 + 语义」
+  两级——条目除 key 外记录 query 文本 / pipeline profile / query 嵌入向量；
+  新增 `lookup()`（先精确、后对**同用户同 profile** 条目做嵌入余弦比较，
+  相似度 ≥ 阈值即复用）、`store()`（带元数据回填，兼容原 `put/get` 契约）
+- 嵌入**懒调用**：lookup 仅精确未命中才调用嵌入器（async embedder 注入），
+  精确命中零嵌入开销；miss 时扫描向量随 match 回传，回填复用避免二次嵌入
+- 隔离与安全：profile（search_type|k|管道标签）与租户双重隔离、余弦阈值保护
+  （低于阈值宁可重新生成，杜绝无关问法串答案）、维度不一致/嵌入失败/TTL 清扫
+  静默退化，不影响主流程
+- 统计扩展：`exact_hits / semantic_hits / semantic_attempts / near_misses`
+  （near_misses 为阈值调优信号），随 `get_knowledge_base_stats` 透出到 `/rag/stats`
+- `rag_agent.py`：缓存块改用 `lookup/store`，语义命中回写当前问法并标注
+  `cache.kind="semantic"` + `matched_query` + `score`；config/环境变量新增
+  `RAG_CACHE_SEMANTIC_ENABLED / _THRESHOLD / _MIN_QUERY_LEN`
+- 测试：`tests/test_rag_semantic_cache.py`（36 项断言，纯离线确定性嵌入）
+  覆盖语义命中/精确零嵌入/隔离/阈值/维度/TTL/LRU/disabled 与 agent 端到端
+  （改述命中跳过检索复用答案、原句精确命中、无关问法 below_threshold）
+- 文档：`RAG_USAGE_GUIDE.md` 新增语义缓存配置示例、FAQ Q6 与 v1.1 更新日志
+
+**为什么这么改**：
+- 名为「语义缓存」实为 exact-hash：改述/近似问法全部 miss，重复检索 + LLM 生成
+- 把"省一次 LLM"的收益从「完全同文重复」扩展到「语义等价问法」，命中率大幅上探
+
+**解决了什么问题**：
+- 近似问法不再重复消耗检索与生成成本；跨用户 / 跨管道答案互不串用
+- 命中来源可观测（exact vs semantic + 相似度），阈值有 `near_misses` 可调信号
+
+---
+
 ## 2026-09-03 Workflow 长任务复盘（Task Recap）与归档
 
 **提交**：`e7bbd85` + `c41ccf8`（配套测试 `7d5dcaa`）

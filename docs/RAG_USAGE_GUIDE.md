@@ -29,6 +29,11 @@ pip install -r requirements.txt
 CHROMA_HOST=localhost
 CHROMA_PORT=8000
 
+# 语义缓存（可选调优）
+RAG_CACHE_SEMANTIC_ENABLED=True      # 精确未命中时启用语义近邻复用
+RAG_CACHE_SEMANTIC_THRESHOLD=0.90    # 相似度下限：低于此值宁可重新生成
+RAG_CACHE_SEMANTIC_MIN_QUERY_LEN=6   # 参与语义匹配的最短查询长度
+
 # Embedding模型选择
 EMBEDDING_MODEL_TYPE=openai  # 或 huggingface
 
@@ -461,7 +466,38 @@ rag_result = await rag_agent.execute({
 # RAG提供知识，记忆维持对话连贯性
 ```
 
+### Q6: 语义缓存是什么？怎么知道命中的是语义还是精确？
+
+**A**: 平台内置**每用户语义缓存**（精确 + 语义两级）。同一用户对完全相同的查询
+直接**精确命中**；对**改述/近似问法**（文本不同但语义相同）会做嵌入余弦比较，
+相似度 ≥ 阈值即复用缓存答案——省掉重复检索与 LLM 生成。
+
+```json
+// 语义命中时，结果 cache 标注如下
+"cache": {
+  "enabled": true,
+  "hit": true,
+  "kind": "semantic",             // exact | semantic | miss
+  "key": "…",
+  "matched_query": "原问法文本",   // 命中的缓存条目对应的问题
+  "score": 0.93                   // 当前问法与缓存问法的余弦相似度
+}
+```
+
+`GET /api/v1/rag/stats`（或 `get_knowledge_base_stats`）现在附带 `cache` 段：
+`exact_hits / semantic_hits / semantic_attempts / near_misses` 等指标可用来
+调优阈值——`near_misses` 持续偏高说明阈值可适当下调。语义层完全可选：
+未配置嵌入、嵌入失败或查询过短时自动退化为纯精确缓存，不影响主流程。
+
 ## 更新日志
+
+### v1.1 (2026-09-03)
+- ✅ **语义缓存升级**：由逐字精确缓存升级为「精确 + 语义」两级——改述/近似问法
+  命中同用户同管道缓存的答案（`kind=semantic`，携带相似度与原问法）
+- ✅ 查询向量懒计算：精确命中零嵌入开销；语义扫描与回填共享同一次嵌入
+- ✅ profile 隔离：不同检索管道（search_type/k/管道标签）的答案互不复用
+- ✅ 阈值保护：低于 `RAG_CACHE_SEMANTIC_THRESHOLD` 宁可重新生成，杜绝无关问法串答案
+- ✅ 命中统计透出到知识库统计（exact/semantic 命中分布 + near_misses 调优信号）
 
 ### v1.0 (2026-08-04)
 - ✅ 初始版本发布

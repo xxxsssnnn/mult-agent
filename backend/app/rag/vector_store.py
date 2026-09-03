@@ -1,323 +1,327 @@
-"""向量存储模块 - ChromaDB集成"""
+"""向量存储模块 - ChromaDB 多租户集成（Enterprise RAG Phase 1）
 
-from typing import List, Optional, Dict, Any
-from uuid import uuid4
+企业级改造要点：
+- 物理租户隔离：每用户独立 collection `rag_{user_id_hex}`，检索永不跨租户
+- 切块级审计：每条切块元数据携带 user_id / doc_id / collection，支持按文档整删
+- 异步安全：所有同步 Chroma 调用经 asyncio.to_thread 委托 + 内部锁串行化，避免阻塞事件循环
+- 后端不可用：统一抛 RAGBackendError，由上层映射 503
+"""
+
+import asyncio
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import UUID, uuid4
+
 import chromadb
 from chromadb.config import Settings as ChromaSettings
-from langchain_community.vectorstores import Chroma
 from langchain.schema import Document
-from app.rag.embedding_service import EmbeddingService
+from langchain_community.vectorstores import Chroma
+
 from app.core.config import settings
+from app.rag.embedding_service import EmbeddingService
+from app.rag.exceptions import RAGBackendError
 import structlog
 
 logger = structlog.get_logger(__name__)
 
 
+def _collection_name_for(user_id) -> str:
+    """按用户生成 Chroma collection 名：rag_{user_id_hex}"""
+    if isinstance(user_id, UUID):
+        hex_id = user_id.hex
+    else:
+        hex_id = str(user_id).replace("-", "")
+    return f"{settings.RAG_COLLECTION_PREFIX}{hex_id}"
+
+
 class VectorStoreManager:
     """
-    向量存储管理器
-    
-    使用ChromaDB作为向量数据库，支持：
-    - 文档向量化存储
-    - 相似性搜索
-    - 元数据过滤
-    - 集合管理
+    多租户向量存储管理器
+
+    ChromaDB 持久化目录内按用户分区：
+    - 写入、删除、检索全部限定在用户自己的 collection 内
+    - 单例共享 embedding_service 与 chroma client
     """
-    
-    def __init__(self, 
-                 collection_name: str = "default",
-                 persist_directory: str = "./chroma_db",
-                 embedding_service: Optional[EmbeddingService] = None):
+
+    def __init__(
+        self,
+        persist_directory: Optional[str] = None,
+        embedding_service: Optional[EmbeddingService] = None,
+        chroma_client: Optional[Any] = None,
+    ):
         """
-        初始化向量存储管理器
-        
         Args:
-            collection_name: 集合名称
-            persist_directory: 持久化目录
-            embedding_service: Embedding服务实例（可选）
+            persist_directory: Chroma 持久化目录（默认取 settings.RAG_PERSIST_DIRECTORY）
+            embedding_service: Embedding 服务（可选，默认自动创建）
+            chroma_client: 外部注入的 chroma client（测试用；None 时自建 PersistentClient）
         """
-        self.collection_name = collection_name
-        self.persist_directory = persist_directory
+        self.persist_directory = persist_directory or settings.RAG_PERSIST_DIRECTORY
         self.embedding_service = embedding_service or EmbeddingService()
-        
-        # 初始化ChromaDB客户端
-        self.chroma_client = chromadb.PersistentClient(
-            path=persist_directory,
-            settings=ChromaSettings(
-                anonymized_telemetry=False
-            )
-        )
-        
-        # 获取或创建集合
-        self.collection = self.chroma_client.get_or_create_collection(
-            name=collection_name,
-            metadata={"description": f"RAG collection: {collection_name}"}
-        )
-        
-        # 初始化LangChain Chroma包装器
-        self.vectorstore = Chroma(
-            client=self.chroma_client,
-            collection_name=collection_name,
-            embedding_function=self._get_embedding_function(),
-            persist_directory=persist_directory
-        )
-        
-        logger.info(
-            "VectorStoreManager initialized",
-            collection_name=collection_name,
-            persist_directory=persist_directory,
-            embedding_model=self.embedding_service.model_type
-        )
-    
-    def _get_embedding_function(self):
-        """获取LangChain兼容的embedding函数"""
-        return self.embedding_service.embeddings
-    
-    async def add_documents(self, documents: List[Document], 
-                          metadatas: Optional[List[Dict[str, Any]]] = None) -> List[str]:
-        """
-        添加文档到向量存储
-        
-        Args:
-            documents: 文档列表
-            metadatas: 元数据列表（可选）
-            
-        Returns:
-            添加的文档ID列表
-        """
-        if not documents:
-            return []
-        
-        # 生成唯一ID
-        ids = [str(uuid4()) for _ in documents]
-        
+        self.chroma_client = chroma_client
+        self._owns_client = chroma_client is None
+        # 串行化向量库操作（Chroma 客户端非线程安全）
+        self._lock = asyncio.Lock()
+        # 每用户 langchain wrapper 缓存
+        self._wrappers: Dict[str, Chroma] = {}
+
+        if self.chroma_client is None:
+            try:
+                self.chroma_client = chromadb.PersistentClient(
+                    path=self.persist_directory,
+                    settings=ChromaSettings(anonymized_telemetry=False),
+                )
+                logger.info(
+                    "VectorStoreManager initialized (tenant-aware)",
+                    persist_directory=self.persist_directory,
+                    collection_prefix=settings.RAG_COLLECTION_PREFIX,
+                    embedding_model=self.embedding_service.model_type,
+                )
+            except Exception as e:  # pragma: no cover - 依赖环境
+                logger.error(
+                    "Failed to initialize Chroma client",
+                    error=str(e),
+                    persist_directory=self.persist_directory,
+                )
+                self.chroma_client = None
+
+    @staticmethod
+    def collection_name_for(user_id) -> str:
+        """获取用户对应的 Chroma collection 名（供 RAGDocument 记录归属）"""
+        return _collection_name_for(user_id)
+
+    # ------------------------------------------------------------------ #
+    # 内部工具
+    # ------------------------------------------------------------------ #
+
+    def _ensure_available(self) -> None:
+        if self.chroma_client is None:
+            raise RAGBackendError("Chroma vector store is not available")
+
+    def _wrapper(self, collection_name: str) -> Chroma:
+        """获取（必要时创建）某用户的 langchain Chroma 包装器"""
+        self._ensure_available()
+        if collection_name not in self._wrappers:
+            try:
+                self.chroma_client.get_or_create_collection(name=collection_name)
+                self._wrappers[collection_name] = Chroma(
+                    client=self.chroma_client,
+                    collection_name=collection_name,
+                    embedding_function=self.embedding_service.embeddings,
+                )
+            except Exception as e:
+                logger.error("Failed to create collection", collection=collection_name, error=str(e))
+                raise RAGBackendError(f"Failed to access vector collection: {e}") from e
+        return self._wrappers[collection_name]
+
+    def _has_collection(self, collection_name: str) -> bool:
         try:
-            # 使用LangChain Chroma添加文档
-            self.vectorstore.add_documents(
-                documents=documents,
-                ids=ids,
-                metadatas=metadatas
-            )
-            
-            logger.info(
-                "Documents added to vector store",
-                num_documents=len(documents),
-                collection=self.collection_name
-            )
-            
-            return ids
-        except Exception as e:
-            logger.error("Failed to add documents", error=str(e))
-            raise
-    
-    async def delete_documents(self, document_ids: List[str]) -> bool:
-        """
-        删除文档
-        
-        Args:
-            document_ids: 要删除的文档ID列表
-            
-        Returns:
-            是否成功删除
-        """
-        if not document_ids:
+            return any(c.name == collection_name for c in self.chroma_client.list_collections())
+        except Exception:
             return False
-        
-        try:
-            self.collection.delete(ids=document_ids)
-            
-            logger.info(
-                "Documents deleted from vector store",
-                num_deleted=len(document_ids),
-                collection=self.collection_name
-            )
-            
-            return True
-        except Exception as e:
-            logger.error("Failed to delete documents", error=str(e))
-            return False
-    
-    async def similarity_search(self, query: str, k: int = 5, 
-                               filter_metadata: Optional[Dict[str, Any]] = None) -> List[Document]:
+
+    # ------------------------------------------------------------------ #
+    # 写入 / 删除
+    # ------------------------------------------------------------------ #
+
+    async def add_chunks(
+        self,
+        user_id,
+        doc_id,
+        chunks: List[Document],
+        base_metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """
-        相似性搜索
-        
+        将文档切块向量化入库（限定在用户自己的 collection）。
+
         Args:
-            query: 查询文本
-            k: 返回结果数量
-            filter_metadata: 元数据过滤条件（可选）
-            
+            user_id: 租户用户
+            doc_id: 文档级 ID（写入每条切块 metadata，支撑按文档删除）
+            chunks: 切块文档列表
+            base_metadata: 需注入每条切块的基础元数据（如 filename）
+
         Returns:
-            相似的文档列表
+            入库切块数
         """
-        try:
-            # 构建搜索参数
-            search_kwargs = {"k": k}
+        if not chunks:
+            return 0
+
+        collection_name = _collection_name_for(user_id)
+
+        async with self._lock:
+            wrapper = self._wrapper(collection_name)
+            ids = [str(uuid4()) for _ in chunks]
+            metadatas = []
+            for chunk in chunks:
+                md = dict(chunk.metadata or {})
+                md.update(base_metadata or {})
+                md["user_id"] = str(user_id)
+                md["doc_id"] = str(doc_id)
+                md["collection"] = collection_name
+                metadatas.append(md)
+
+            def _add() -> None:
+                wrapper.add_documents(documents=chunks, ids=ids, metadatas=metadatas)
+
+            try:
+                await asyncio.to_thread(_add)
+            except Exception as e:
+                logger.error(
+                    "Failed to add chunks to vector store",
+                    collection=collection_name,
+                    num_chunks=len(chunks),
+                    error=str(e),
+                )
+                raise RAGBackendError(f"Failed to add chunks to vector store: {e}") from e
+
+            logger.info(
+                "Chunks added to vector store",
+                collection=collection_name,
+                doc_id=str(doc_id),
+                num_chunks=len(chunks),
+            )
+            return len(chunks)
+
+    async def delete_document_chunks(self, user_id, doc_id) -> bool:
+        """
+        按文档级 doc_id 删除该文档全部切块（限定在用户自己的 collection）。
+        """
+        collection_name = _collection_name_for(user_id)
+        if not self._has_collection(collection_name):
+            return False
+
+        async with self._lock:
+            try:
+                collection = self.chroma_client.get_collection(name=collection_name)
+                collection.delete(where={"doc_id": str(doc_id)})
+                logger.info(
+                    "Document chunks deleted",
+                    collection=collection_name,
+                    doc_id=str(doc_id),
+                )
+                return True
+            except Exception as e:
+                logger.error("Failed to delete document chunks", doc_id=str(doc_id), error=str(e))
+                raise RAGBackendError(f"Failed to delete document chunks: {e}") from e
+
+    async def delete_user_collection(self, user_id) -> bool:
+        """
+        删除用户整个 collection（清空知识库时使用）。
+        """
+        collection_name = _collection_name_for(user_id)
+
+        async with self._lock:
+            if not self._has_collection(collection_name):
+                self._wrappers.pop(collection_name, None)
+                return True
+            try:
+                await asyncio.to_thread(
+                    self.chroma_client.delete_collection, name=collection_name
+                )
+                self._wrappers.pop(collection_name, None)
+                logger.info("User collection deleted", collection=collection_name)
+                return True
+            except Exception as e:
+                logger.error("Failed to delete user collection", collection=collection_name, error=str(e))
+                raise RAGBackendError(f"Failed to delete user collection: {e}") from e
+
+    # ------------------------------------------------------------------ #
+    # 检索
+    # ------------------------------------------------------------------ #
+
+    async def similarity_search(
+        self,
+        user_id,
+        query: str,
+        k: int = 5,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Document]:
+        """相似性检索（仅限该用户 collection）"""
+        collection_name = _collection_name_for(user_id)
+
+        async with self._lock:
+            wrapper = self._wrapper(collection_name)
+            kwargs: Dict[str, Any] = {"k": k}
             if filter_metadata:
-                search_kwargs["filter"] = filter_metadata
-            
-            # 执行相似性搜索
-            results = self.vectorstore.similarity_search(
-                query=query,
-                **search_kwargs
-            )
-            
+                kwargs["filter"] = filter_metadata
+
+            def _search():
+                return wrapper.similarity_search(query=query, **kwargs)
+
+            try:
+                results = await asyncio.to_thread(_search)
+            except Exception as e:
+                logger.error("Similarity search failed", collection=collection_name, error=str(e))
+                raise RAGBackendError(f"Similarity search failed: {e}") from e
+
             logger.debug(
                 "Similarity search completed",
-                query_length=len(query),
-                num_results=len(results),
-                k=k
-            )
-            
-            return results
-        except Exception as e:
-            logger.error("Similarity search failed", error=str(e))
-            raise
-    
-    async def similarity_search_with_score(self, query: str, k: int = 5) -> List[tuple]:
-        """
-        带分数的相似性搜索
-        
-        Args:
-            query: 查询文本
-            k: 返回结果数量
-            
-        Returns:
-            (文档, 分数) 元组列表，分数越低越相似
-        """
-        try:
-            results = self.vectorstore.similarity_search_with_score(
-                query=query,
-                k=k
-            )
-            
-            logger.debug(
-                "Similarity search with score completed",
-                query_length=len(query),
-                num_results=len(results)
-            )
-            
-            return results
-        except Exception as e:
-            logger.error("Similarity search with score failed", error=str(e))
-            raise
-    
-    async def max_marginal_relevance_search(self, query: str, k: int = 5,
-                                           fetch_k: int = 20) -> List[Document]:
-        """
-        最大边际相关性搜索（MMR）
-        
-        MMR在相关性和多样性之间取得平衡，避免返回过于相似的结果
-        
-        Args:
-            query: 查询文本
-            k: 返回结果数量
-            fetch_k: 初始检索数量
-            
-        Returns:
-            文档列表
-        """
-        try:
-            results = self.vectorstore.max_marginal_relevance_search(
-                query=query,
-                k=k,
-                fetch_k=fetch_k
-            )
-            
-            logger.debug(
-                "MMR search completed",
-                query_length=len(query),
+                collection=collection_name,
                 num_results=len(results),
                 k=k,
-                fetch_k=fetch_k
             )
-            
             return results
-        except Exception as e:
-            logger.error("MMR search failed", error=str(e))
-            raise
-    
-    async def get_collection_stats(self) -> Dict[str, Any]:
-        """
-        获取集合统计信息
-        
-        Returns:
-            统计信息字典
-        """
+
+    async def similarity_search_with_score(
+        self, user_id, query: str, k: int = 5
+    ) -> List[Tuple[Document, float]]:
+        """带距离分数的相似性检索（分数越低越相似）"""
+        collection_name = _collection_name_for(user_id)
+
+        async with self._lock:
+            wrapper = self._wrapper(collection_name)
+
+            def _search():
+                return wrapper.similarity_search_with_score(query=query, k=k)
+
+            try:
+                results = await asyncio.to_thread(_search)
+            except Exception as e:
+                logger.error("Similarity search with score failed", collection=collection_name, error=str(e))
+                raise RAGBackendError(f"Similarity search with score failed: {e}") from e
+            return results
+
+    async def max_marginal_relevance_search(
+        self, user_id, query: str, k: int = 5, fetch_k: int = 20
+    ) -> List[Document]:
+        """MMR 检索（相关性 + 多样性均衡）"""
+        collection_name = _collection_name_for(user_id)
+
+        async with self._lock:
+            wrapper = self._wrapper(collection_name)
+
+            def _search():
+                return wrapper.max_marginal_relevance_search(query=query, k=k, fetch_k=fetch_k)
+
+            try:
+                results = await asyncio.to_thread(_search)
+            except Exception as e:
+                logger.error("MMR search failed", collection=collection_name, error=str(e))
+                raise RAGBackendError(f"MMR search failed: {e}") from e
+            return results
+
+    # ------------------------------------------------------------------ #
+    # 统计
+    # ------------------------------------------------------------------ #
+
+    async def count(self, user_id) -> int:
+        """当前用户 collection 的切块总数（无 collection 返回 0）"""
+        collection_name = _collection_name_for(user_id)
+        if not self._has_collection(collection_name):
+            return 0
         try:
-            count = self.collection.count()
-            
-            return {
-                "collection_name": self.collection_name,
-                "document_count": count,
-                "embedding_dimension": self.embedding_service.get_embedding_dimension(),
-                "embedding_model": self.embedding_service.model_type,
-                "persist_directory": self.persist_directory
-            }
+            collection = self.chroma_client.get_collection(name=collection_name)
+            return collection.count()
         except Exception as e:
-            logger.error("Failed to get collection stats", error=str(e))
-            raise
-    
-    async def delete_collection(self) -> bool:
-        """
-        删除整个集合
-        
-        Returns:
-            是否成功删除
-        """
-        try:
-            self.chroma_client.delete_collection(name=self.collection_name)
-            
-            logger.info(
-                "Collection deleted",
-                collection_name=self.collection_name
-            )
-            
-            return True
-        except Exception as e:
-            logger.error("Failed to delete collection", error=str(e))
-            return False
-    
-    async def update_document(self, document_id: str, document: Document,
-                             metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        更新文档
-        
-        Args:
-            document_id: 文档ID
-            document: 新文档内容
-            metadata: 新元数据（可选）
-            
-        Returns:
-            是否成功更新
-        """
-        try:
-            # 先删除旧文档
-            await self.delete_documents([document_id])
-            
-            # 再添加新文档
-            await self.add_documents([document], [metadata] if metadata else None)
-            
-            logger.info(
-                "Document updated",
-                document_id=document_id,
-                collection=self.collection_name
-            )
-            
-            return True
-        except Exception as e:
-            logger.error("Failed to update document", error=str(e))
-            return False
-    
-    def get_supported_operations(self) -> List[str]:
-        """获取支持的操作列表"""
-        return [
-            "add_documents",
-            "delete_documents",
-            "similarity_search",
-            "similarity_search_with_score",
-            "max_marginal_relevance_search",
-            "update_document",
-            "get_collection_stats",
-            "delete_collection"
-        ]
+            logger.error("Failed to count collection", collection=collection_name, error=str(e))
+            raise RAGBackendError(f"Failed to count collection: {e}") from e
+
+    async def collection_stats(self, user_id) -> Dict[str, Any]:
+        """用户向量库统计信息"""
+        collection_name = _collection_name_for(user_id)
+        chunk_count = await self.count(user_id)
+        return {
+            "collection_name": collection_name,
+            "chunk_count": chunk_count,
+            "embedding_model": self.embedding_service.model_type,
+            "embedding_dimension": self.embedding_service.get_embedding_dimension(),
+            "persist_directory": self.persist_directory,
+        }

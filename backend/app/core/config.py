@@ -70,5 +70,27 @@ class Settings:
     # 单个会话 event 记忆保留上限（超出部分归档，防膨胀）
     MEMORY_EVENT_MAX_PER_SESSION: int = int(os.getenv("MEMORY_EVENT_MAX_PER_SESSION", "100"))
 
+    # --- Enterprise RAG (Phase 1) ---
+    # 是否启用 RAG 服务
+    RAG_ENABLED: bool = os.getenv("RAG_ENABLED", "True").lower() == "true"
+    # ChromaDB 持久化目录（本地持久化客户端）
+    RAG_PERSIST_DIRECTORY: str = os.getenv("RAG_PERSIST_DIRECTORY", "./chroma_db")
+    # 多租户 collection 前缀，每个用户独立 collection：rag_{user_id_hex}
+    RAG_COLLECTION_PREFIX: str = os.getenv("RAG_COLLECTION_PREFIX", "rag_")
+    # 文档切块参数
+    RAG_CHUNK_SIZE: int = int(os.getenv("RAG_CHUNK_SIZE", "1000"))
+    RAG_CHUNK_OVERLAP: int = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
+    # 检索参数
+    RAG_RETRIEVAL_K: int = int(os.getenv("RAG_RETRIEVAL_K", "5"))
+    RAG_SEARCH_TYPE: str = os.getenv("RAG_SEARCH_TYPE", "similarity")
+    # Embedding 后端: openai / huggingface
+    RAG_EMBEDDING_MODEL_TYPE: str = os.getenv("RAG_EMBEDDING_MODEL_TYPE", "openai")
+    RAG_EMBEDDING_MODEL_NAME: str = os.getenv("RAG_EMBEDDING_MODEL_NAME", "")
+    # 上传限制
+    RAG_MAX_FILE_SIZE_MB: int = int(os.getenv("RAG_MAX_FILE_SIZE_MB", "20"))
+    RAG_ALLOWED_EXTENSIONS: list = os.getenv("RAG_ALLOWED_EXTENSIONS", ".pdf,.txt,.docx,.doc,.md").split(",")
+    # 分页默认值
+    RAG_DOCS_PAGE_SIZE: int = int(os.getenv("RAG_DOCS_PAGE_SIZE", "20"))
+
 
 settings = Settings()

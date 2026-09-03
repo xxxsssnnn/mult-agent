@@ -1,0 +1,11 @@
+# RAGAS 评估可选依赖（平台核心运行不需要，勿加入 requirements.txt）
+#
+# 仅在运行评估 runner 时安装：
+#   pip install -r backend/requirements-eval.txt
+#
+# 版本说明：
+#   - >=0.1.10,<0.2：legacy API（本仓库 evaluator 的主适配路径，pydantic v2 兼容自 0.1.12 起更稳）
+#   - 0.2.x：evaluator 也能自动适配（EvaluationDataset API）
+# 若与主依赖（pydantic 2.x）冲突，建议在独立 venv 中安装后，
+# 设置 PYTHONPATH 指向仓库 backend 再运行 runner。
+ragas>=0.1.10

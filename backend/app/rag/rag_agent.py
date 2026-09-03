@@ -221,11 +221,13 @@ class RAGAgent(BaseAgent):
         执行 RAG 查询（严格限定在该用户自己的向量 collection 内）。
 
         Args:
-            task_input: 含 query / k / search_type
+            task_input: 含 query / k / search_type / include_full_documents
             user_id: 租户用户（缺失时从 task_input["user_id"] 读取）
 
         Returns:
-            包含答案与检索结果的字典（调用方负责捕获领域异常）
+            包含答案与检索结果的字典（调用方负责捕获领域异常）。
+            include_full_documents=True 时额外携带 full_documents（检索命中的全文
+            片段列表，供 RAGAS 评估等使用）；该字段不写入语义缓存。
         """
         await self._ensure_ready()
         user_id = self._require_user_id(user_id or task_input.get("user_id"))
@@ -375,6 +377,9 @@ class RAGAgent(BaseAgent):
                 "key": cache_key,
             },
         }
+        # 评估扩展（可选）：携带模型实际看到的全文片段，不参与缓存快照
+        if task_input.get("include_full_documents"):
+            result["full_documents"] = [doc.page_content for doc in retrieved_docs]
 
         # 5. 回填缓存（仅缓存可复现的快照字段，命中时再覆写 cache 状态）
         if self.semantic_cache is not None and cache_key:

@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-09-03 Agents/Workflows 挂载会话记忆
+
+**提交**：`8c84837`（配套测试 `0027016`）
+
+**改了什么**：
+- `BaseAgent` 记忆装载重写（此前 `set_memory/execute_with_memory` 存在但零调用、且输入输出键不匹配任何具体 Agent）：
+  - 新增 `attach_memory(memory_manager)`：挂载**已构造**的 manager（多 Agent 共享同一会话，不重复初始化）
+  - `set_memory` 保留签名，返回 manager 便于复用
+  - `execute_with_memory`：**深拷贝防污染**（不再向调用方 dict 塞 `memory_context`）；`get_context()` 结果截断至 4000 字符注入 `memory_context` 键；用户消息按 `user_input/requirement/question/query` 提取（仅有 code 时加"请审查以下代码"前缀）；助手消息按 `explanation/review/summary/output/answer` 提取、code 截断兜底 —— Coder/Reviewer 的键适配补齐
+- CoderAgent / ReviewerAgent 组装 prompt 时消费 `memory_context`，生成与审查轮次可参考历史会话（无记忆时行为不变）
+- `BaseWorkflow` 新增 `memory_manager` 构造注入 + `ensure_memory(initial_state)`（支持 `initial_state["memory"]` = session_id/user_id/db_session 配置自动建 manager）+ `memory_info()`（结果回传会话元信息）
+- CodeReviewWorkflow / TaskPlannerWorkflow：开始执行时装载记忆并 attach 到**所有**参与 Agent（TaskPlanner 对动态创建的子 Coder/Reviewer 同样挂载），节点调用改为 `execute_with_memory`；结果 `metadata.memory` 回传 `{enabled, session_id}` —— 一次工作流内多 Agent 轮次汇聚到同一会话，跨请求带上 session_id 即可延续
+- HTTP：`POST /api/v1/workflows/code-review`、`/task-planner` 支持 `enable_memory` + 可选 `session_id`（不传自动生成并随 metadata 返回），复用请求 DB 会话持久化
+- 文档：`MEMORY_USAGE_GUIDE.md` 新增「Workflow 会话记忆」小节并修正 execute_with_memory 键适配说明
+- `backend/tests/test_workflow_memory.py`（40 项断言）：FakeMemoryManager + mock Agent **纯离线**覆盖消息键适配、上下文注入/防污染、Coder/Reviewer 实际适配、两工作流共享记忆与 metadata 回传、未启用记忆零回归
+
+**为什么这么改**：
+- 记忆模块早已具备（短/长程 + 持久化），但"接入 Agent/Workflow"只是纸面接口：Coder 产出 `code` 而 execute_with_memory 只认 `output`，workflow 从不挂载 —— 记忆实际上不可用
+- Workflow 是记忆最自然的载体：多 Agent 多轮次共享会话，让"上下文连续"不再依赖每次请求把全量历史塞进 input
+
+**解决了什么问题**：
+- 记忆从"可调用的库"变成"开箱即用的会话能力"：一行 `enable_memory` + 同一 `session_id`，跨请求/跨 Agent 上下文自动衔接
+- 修复输入污染与键不匹配两个潜在缺陷；未启用记忆路径与旧行为严格一致（全量回归通过）
+
+---
+
 ## 2026-09-03 RAG RAGAS 离线评估框架
 
 **提交**：`09526e4`（配套测试 `71990d3`）

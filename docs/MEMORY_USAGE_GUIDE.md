@@ -41,14 +41,66 @@ from app.agents.coder import CoderAgent
 agent = CoderAgent(agent_id=uuid4(), name="MyCoder")
 await agent.initialize()
 
-# 设置记忆
+# 设置记忆（按会话新建 MemoryManager）
 await agent.set_memory(session_id="session-123")
 
 # 执行任务（自动使用记忆）
 result = await agent.execute_with_memory({
-    "user_input": "继续刚才的代码优化"
+    "requirement": "继续刚才的代码优化",
+    "language": "python"
 })
 ```
+
+`execute_with_memory` 自动适配各 Agent 的输入输出键并写入会话：
+
+- **用户消息提取**：`user_input` / `requirement` / `question` / `query`；仅有 `code` 时自动加"请审查以下代码"前缀
+- **助手消息提取**：`explanation` / `review` / `summary` / `output` / `answer`；仅有 `code` 时截断保存
+- **记忆上下文注入**：执行前 `get_context()` 的结果（截断至 4000 字符）以 `memory_context` 键注入任务输入，Coder/Reviewer 组装 prompt 时自动带"历史会话记忆参考"段
+- 使用**深拷贝**，不污染调用方传入的 dict
+
+多个 Agent 共享同一会话记忆时，请用 `attach_memory`（不重复初始化、复用同一管理器）：
+
+```python
+manager = await agent_a.set_memory(session_id="shared-session")  # 或自行构造
+await agent_b.attach_memory(manager)   # 两 Agent 写入/读取同一会话
+```
+
+### 3. Workflow 会话记忆（多 Agent 贯穿）
+
+CodeReview / TaskPlanner 工作流支持**会话级记忆**：工作流内所有 Agent（含动态创建的子
+Agent）共享同一个 MemoryManager，每一轮生成/审查都写入同一会话，后续轮次可参考历史。
+
+两种开启方式（不开启时行为与旧版完全一致）：
+
+```python
+from app.workflows.code_review import CodeReviewWorkflow
+
+# 方式一：构造注入（共享/测试注入同一个已构造的 manager）
+workflow = CodeReviewWorkflow(coder_agent=..., reviewer_agent=...,
+                              memory_manager=memory_manager)
+
+# 方式二：execute 时通过 initial_state 配置（由工作流自动创建）
+result = await workflow.execute({
+    "requirement": "重构订单模块",
+    "memory": {"session_id": "workflow-session-001",
+               "user_id": "user-123",
+               "db_session": db},   # 传 db 会话则持久化到数据库
+})
+# 结果 metadata.memory = {"enabled": true, "session_id": "workflow-session-001"}
+```
+
+HTTP 层开启（`POST /api/v1/workflows/code-review` 与 `/task-planner`）：
+
+```json
+{
+  "requirement": "重构订单模块",
+  "enable_memory": true,
+  "session_id": "wf-001"
+}
+```
+
+不传 `session_id` 时服务端自动生成并随结果 `metadata.memory.session_id` 返回；
+下一次请求带上同一 `session_id` 即可延续会话记忆（自动做长短期记忆合并与摘要）。
 
 ## 📖 API端点
 

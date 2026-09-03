@@ -1,9 +1,10 @@
-from typing import Dict, Any, TypedDict, List
+from typing import Dict, Any, TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 from app.agents.coder import CoderAgent
 from app.agents.reviewer import ReviewerAgent
 from app.workflows.base import BaseWorkflow
+from app.workflows.recap import build_recap, format_recap
 from uuid import uuid4
 import structlog
 import json
@@ -39,6 +40,8 @@ class CodeReviewState(TypedDict):
     approved: bool
     iteration_count: int
     max_iterations: int
+    #: 结构化审查结果（dict 或 None），须显式声明以便 langgraph 保留该通道
+    structured_review: Optional[Dict[str, Any]]
 
 
 class CodeReviewWorkflow(BaseWorkflow):
@@ -336,6 +339,35 @@ Please improve the code based on this feedback.
                 memory_meta = self.memory_info()
                 if memory_meta:
                     metadata["memory"] = memory_meta
+
+                # 执行复盘：结构化回传 + 写入会话记忆
+                approved = bool(result.get("approved", False))
+                sr = result.get("structured_review")
+                score, issue_count = None, 0
+                if isinstance(sr, dict):
+                    score = sr.get("score")
+                    issue_count = len(sr.get("issues") or [])
+                elif sr is not None:
+                    score = getattr(sr, "score", None)
+                    issue_count = len(getattr(sr, "issues", None) or [])
+                recap = build_recap(
+                    workflow_name=self.name,
+                    objective=initial_state.get("requirement", ""),
+                    success=True,
+                    attempts=retry_count + 1,
+                    iterations=result.get("iteration_count", 0),
+                    summary={
+                        "approved": approved,
+                        "score": score,
+                        "issue_count": issue_count,
+                    },
+                    notes=[
+                        f"审查{'通过' if approved else '未通过'}（评分 {score if score is not None else '-'}，"
+                        f"遗留问题 {issue_count} 项）"
+                    ],
+                )
+                await self.record_recap(format_recap(recap))
+                metadata["recap"] = recap
                 
                 return {
                     "success": True,
@@ -362,9 +394,18 @@ Please improve the code based on this feedback.
                     logger.error("Max retries reached, workflow failed")
         
         # 所有重试都失败
+        recap = build_recap(
+            workflow_name=self.name,
+            objective=initial_state.get("requirement", ""),
+            success=False,
+            attempts=retry_count,
+            notes=[f"执行失败：{str(last_error)}"],
+        )
+        await self.record_recap(format_recap(recap))
         return {
             "success": False,
             "error": str(last_error),
             "max_retries_reached": True,
-            "attempts": retry_count
+            "attempts": retry_count,
+            "metadata": {"recap": recap},
         }

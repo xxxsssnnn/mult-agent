@@ -5,6 +5,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 import json
 from app.workflows.base import BaseWorkflow
+from app.workflows.recap import build_recap, format_recap
 from app.core.config import settings
 import structlog
 
@@ -576,6 +577,30 @@ class TaskPlannerWorkflow(BaseWorkflow):
                 memory_meta = self.memory_info()
                 if memory_meta:
                     metadata["memory"] = memory_meta
+
+                # 长任务复盘：结构化回传 + 写入会话记忆（供同会话延续）
+                recap = build_recap(
+                    workflow_name=self.name,
+                    objective=state.get("user_input", ""),
+                    success=True,
+                    attempts=retry_count + 1,
+                    summary={
+                        "total_tasks": metadata["total_tasks"],
+                        "completed_tasks": metadata["completed_tasks"],
+                        "failed_tasks": metadata["failed_tasks"],
+                    },
+                    tasks=[
+                        {
+                            "id": t.get("id"),
+                            "task_type": t.get("task_type"),
+                            "status": t.get("status"),
+                            "summary": t.get("title", ""),
+                        }
+                        for t in result["tasks"]
+                    ],
+                )
+                await self.record_recap(format_recap(recap))
+                metadata["recap"] = recap
                 
                 return {
                     "success": True,
@@ -601,9 +626,18 @@ class TaskPlannerWorkflow(BaseWorkflow):
                     logger.error("Max retries reached, workflow failed")
         
         # 所有重试都失败
+        recap = build_recap(
+            workflow_name=self.name,
+            objective=initial_state.get("user_input", ""),
+            success=False,
+            attempts=retry_count,
+            notes=[f"执行失败：{str(last_error)}"],
+        )
+        await self.record_recap(format_recap(recap))
         return {
             "success": False,
             "error": str(last_error),
             "max_retries_reached": True,
-            "attempts": retry_count
+            "attempts": retry_count,
+            "metadata": {"recap": recap},
         }

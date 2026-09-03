@@ -124,3 +124,20 @@ class BaseWorkflow(ABC):
             "enabled": True,
             "session_id": getattr(self.memory_manager, "session_id", None),
         }
+
+    async def record_recap(self, text: str, *, kind: str = "task_recap") -> bool:
+        """把执行复盘写入共享会话记忆（assistant 消息，kind 标记）。
+
+        仅在启用会话记忆时生效；记忆写入失败静默降级（不阻断主流程）。
+        """
+        if self.memory_manager is None:
+            return False
+        try:
+            await self.memory_manager.add_message("assistant", text, {"kind": kind})
+            logger.info("workflow.recap.recorded", workflow=self.name, kind=kind)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "workflow.recap.write_failed", workflow=self.name, error=str(e)
+            )
+            return False

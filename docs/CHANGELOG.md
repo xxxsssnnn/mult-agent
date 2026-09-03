@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-09-03 RAG 混合检索（BM25+向量+RRF）+ 语义缓存
+
+**提交**：`82972b9`（配套测试 `3cad018`）
+
+**改了什么**：
+- 默认检索策略升级为 **hybrid**：BM25 词法路 + 向量语义路 双路召回 + RRF 融合（`search_type=hybrid`，API 校验同步放开）
+- 新增 `backend/app/rag/lexical.py`：自实现 Okapi BM25（零新依赖），分词同时支持中英文（英文按词、中文按单字）；按用户分区的倒排统计懒构建 + 脏标记增量重建
+- 新增 `backend/app/rag/fusion.py`：`reciprocal_rank_fusion` 纯函数融合
+- `backend/app/rag/vector_store.py`：切块写入时注入 `chunk_id` 作为融合对齐锚点；`add_chunks/delete_document_chunks/delete_user_collection` 同步维护词法索引；新增 `hybrid_search`；**进程重启后首次 hybrid 查询自动从 Chroma 懒重建词法索引**（避免"词法只活在重启前"）
+- 新增 `backend/app/rag/cache.py`：每用户作用域语义缓存（查询→答案），LRU 容量裁剪 + TTL 兜底 + **知识库变更事件失效**（ingest 新增 / 删除文档 / 清空自动清缓存），可关闭旁路
+- `backend/app/core/config.py`：新增 `RAG_LEXICAL_ENABLED / RAG_HYBRID_FETCH_MULTIPLIER / RAG_HYBRID_RRF_K` 与 `RAG_CACHE_ENABLED / RAG_CACHE_TTL_SECONDS / RAG_CACHE_MAX_ENTRIES_PER_USER`
+- 能力面如实暴露：`capabilities` 含 `hybrid_search`、`semantic_cache`，`search_strategies` 首项为 `hybrid`；`execute` 返回带 `cache.hit/key` 状态
+- `backend/tests/test_rag_hybrid_cache.py`（43 项断言）：RRF 融合、中英文分词、BM25 相关性/生命周期/幂等/重建、缓存命中/TTL/LRU/每用户隔离/事件失效、Agent 端到端 hybrid+缓存
+
+**为什么这么改**：
+- 纯向量相似度对"关键词精准命中、专有名词、缩写"场景召回弱（语义向量不擅词级匹配）；混合检索是当前企业级 RAG 的召回标准做法
+- 上一批已引入向量库持久化，但"每次查询都重算 LLM 答案"成本高、响应慢；同查询短时重复在企业对话中很常见
+
+**解决了什么问题**：
+- 召回质量：词法精确命中 + 语义泛化互补，RRF 融合无需调权
+- 成本与延迟：重复查询直接命中缓存（省去向量检索 + LLM 生成）；知识库变更即时失效，答案不陈旧
+- 词法索引生命周期闭环：与向量层同步维护 + 重启后懒重建，长期可依赖
+
+---
+
 ## 2026-09-03 RAG 文档级持久化 + 多租户文档管理 API
 
 **提交**：`a482e58`

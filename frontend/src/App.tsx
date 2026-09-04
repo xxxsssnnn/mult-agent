@@ -8,6 +8,7 @@ import Agents from './pages/Agents'
 import Tasks from './pages/Tasks'
 import Conversations from './pages/Conversations'
 import Memories from './pages/Memories'
+import KnowledgeBase from './pages/KnowledgeBase'
 
 function App() {
   return (
@@ -22,6 +23,7 @@ function App() {
             <Route path="tasks" element={<Tasks />} />
             <Route path="conversations" element={<Conversations />} />
             <Route path="memories" element={<Memories />} />
+            <Route path="knowledge" element={<KnowledgeBase />} />
           </Route>
         </Routes>
       </BrowserRouter>

@@ -12,6 +12,8 @@ class Task(Base):
     task_id = Column(String(100), unique=True, nullable=False, index=True)
     parent_task_id = Column(Uuid(as_uuid=True), ForeignKey("tasks.id"))
     agent_id = Column(Uuid(as_uuid=True), ForeignKey("agents.id"))
+    # 资源所有者（租户隔离）：非 admin 用户只能访问自己的任务
+    user_id = Column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     title = Column(String(200), nullable=False)
     description = Column(Text)
     status = Column(String(20), default="pending")

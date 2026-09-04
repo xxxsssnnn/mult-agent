@@ -129,5 +129,23 @@ class Settings:
     # 分页默认值
     RAG_DOCS_PAGE_SIZE: int = int(os.getenv("RAG_DOCS_PAGE_SIZE", "20"))
 
+    # --- Workflow 答案语义检索（执行档案向量索引） ---
+    # workflow 归档后把执行答案（复盘 + 子任务结果）向量化的总开关
+    WORKFLOW_ANSWER_INDEX_ENABLED: bool = os.getenv("WORKFLOW_ANSWER_INDEX_ENABLED", "True").lower() == "true"
+    # 专用 Chroma 持久目录（独立于 RAG chroma_db，避免同一目录多客户端锁冲突）
+    WORKFLOW_ANSWER_PERSIST_DIRECTORY: str = os.getenv("WORKFLOW_ANSWER_PERSIST_DIRECTORY", "./wf_answer_db")
+    # 全部用户共用一个 collection，按 user_id 元数据隔离
+    WORKFLOW_ANSWER_COLLECTION: str = os.getenv("WORKFLOW_ANSWER_COLLECTION", "wf_answers")
+    # Embedding 复用 RAG 后端配置（model_type / model_name），不单独新增
+
+    # --- Workflow 执行引擎（DAG 并行 / 子任务护栏） ---
+    # 同一时刻最多并发执行的子任务数
+    WORKFLOW_MAX_CONCURRENCY: int = int(os.getenv("WORKFLOW_MAX_CONCURRENCY", "2"))
+    # 单个子任务执行超时（秒），超时按失败计并可重试
+    WORKFLOW_TASK_TIMEOUT_SECONDS: float = float(os.getenv("WORKFLOW_TASK_TIMEOUT_SECONDS", "120"))
+    # 子任务失败后的额外重试次数（总尝试 = 该值 + 1）
+    WORKFLOW_TASK_MAX_RETRIES: int = int(os.getenv("WORKFLOW_TASK_MAX_RETRIES", "1"))
+
+
 
 settings = Settings()

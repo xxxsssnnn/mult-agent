@@ -6,6 +6,16 @@ from pydantic import BaseModel, Field
 import json
 from app.workflows.base import BaseWorkflow
 from app.workflows.recap import build_recap, format_recap
+from app.workflows.execution import (
+    CyclicDependencyError,
+    ExecutionOptions,
+    execute_dag,
+)
+from app.workflows.checkpoint import (
+    build_checkpoint,
+    extract_resume,
+    sanitize_tasks,
+)
 from app.core.config import settings
 import structlog
 
@@ -27,10 +37,14 @@ class TaskPlanState(TypedDict):
     """任务规划状态"""
     user_input: str
     tasks: List[Dict[str, Any]]
-    current_task_index: int
     results: List[Dict[str, Any]]
     status: str
     llm: Optional[ChatOpenAI]
+    # 运行台账配置（鸭子类型：store 提供 create/save_checkpoint/load_run/
+    # finalize；不配置时走旧行为，全离线可用）
+    checkpoint: Optional[Dict[str, Any]]
+    # 从台账载入的已终态 results/attempts（引擎 resume seed）
+    resume: Optional[Dict[str, Any]]
 
 
 class TaskPlannerWorkflow(BaseWorkflow):
@@ -61,27 +75,17 @@ class TaskPlannerWorkflow(BaseWorkflow):
         """构建任务规划工作流图"""
         workflow = StateGraph(TaskPlanState)
         
-        # 添加节点
+        # 添加节点（analyze → run_dag → aggregate：任务调度由 DAG 引擎执行）
         workflow.add_node("analyze_task", self.analyze_task)
-        workflow.add_node("execute_task", self.execute_task)
+        workflow.add_node("run_dag", self.run_dag)
         workflow.add_node("aggregate_results", self.aggregate_results)
         
         # 设置入口点
         workflow.set_entry_point("analyze_task")
         
         # 添加边
-        workflow.add_edge("analyze_task", "execute_task")
-        
-        # 条件边：检查是否还有任务需要执行
-        workflow.add_conditional_edges(
-            "execute_task",
-            self.check_next_task,
-            {
-                "continue": "execute_task",
-                "complete": "aggregate_results"
-            }
-        )
-        
+        workflow.add_edge("analyze_task", "run_dag")
+        workflow.add_edge("run_dag", "aggregate_results")
         workflow.add_edge("aggregate_results", END)
         
         self.graph = workflow.compile()
@@ -91,6 +95,13 @@ class TaskPlannerWorkflow(BaseWorkflow):
         """分析用户输入，使用LLM智能分解为子任务"""
         logger.info("Analyzing task with LLM", input=state["user_input"])
         
+        # resume 路径：任务定义已持久化在台账中，跳过重新分解（避免重复 LLM 消耗）
+        if state.get("tasks"):
+            logger.info("Resume: 复用台账中已分解任务，跳过重新规划",
+                        total=len(state["tasks"]))
+            state["status"] = "analyzed"
+            return state
+
         user_input = state["user_input"]
         
         # 如果有LLM，使用智能分解
@@ -107,7 +118,6 @@ class TaskPlannerWorkflow(BaseWorkflow):
             tasks = self._simple_decompose(user_input)
         
         state["tasks"] = tasks
-        state["current_task_index"] = 0
         state["results"] = []
         state["status"] = "analyzed"
         
@@ -295,53 +305,112 @@ class TaskPlannerWorkflow(BaseWorkflow):
         
         return tasks
     
-    async def execute_task(self, state: TaskPlanState) -> TaskPlanState:
-        """执行当前任务，根据任务类型调用对应的Agent"""
-        current_index = state["current_task_index"]
-        tasks = state["tasks"]
-        
-        if current_index >= len(tasks):
-            return state
-        
-        current_task = tasks[current_index]
-        logger.info("Executing task", task_id=current_task["id"], title=current_task["title"], type=current_task.get("task_type"))
-        
-        # 根据任务类型选择执行策略
+    async def run_dag(self, state: TaskPlanState) -> TaskPlanState:
+        """由 DAG 引擎并发执行全部子任务（依赖/超时/重试由引擎负责）。
+
+        台账配置存在时：每子任务终态落一次 checkpoint；结束后标记 completed。
+        resume seed 传入引擎：已终态任务直接复用，断点续跑。
+        """
+        logger.info("Running task DAG", total=len(state["tasks"]))
+
+        ckpt_cfg = state.get("checkpoint") or {}
+        store = ckpt_cfg.get("store")
+        run_id = ckpt_cfg.get("run_id")
+
+        async def checkpoint_hook(partial) -> None:
+            """每子任务终态 → 组装 checkpoint 落台账（失败仅告警）。"""
+            try:
+                await store.save_checkpoint(run_id, build_checkpoint(
+                    run_id=run_id,
+                    label=ckpt_cfg.get("label") or "任务规划",
+                    objective=ckpt_cfg.get("objective")
+                    or state.get("user_input", ""),
+                    tasks=state["tasks"],
+                    partial=partial,
+                ))
+            except Exception:
+                logger.exception("Checkpoint 落库失败（尽力而为）",
+                                 run_id=run_id)
+
         try:
-            result = await self._execute_by_type(current_task, state)
-        except Exception as e:
-            logger.error(f"Task execution failed: {e}")
-            result = {
-                "task_id": current_task["id"],
-                "status": "failed",
-                "output": f"执行失败: {str(e)}",
-                "error": str(e)
-            }
-        
-        state["results"].append(result)
-        state["current_task_index"] = current_index + 1
-        
-        # 更新任务状态
-        tasks[current_index]["status"] = result.get("status", "completed")
-        
-        logger.info(
-            "Task completed",
-            task_id=current_task["id"],
-            status=result.get("status"),
-            completed=current_index + 1,
-            total=len(tasks)
-        )
-        
+            report = await execute_dag(
+                state["tasks"],
+                self._dag_runner(),
+                ExecutionOptions(
+                    max_concurrency=settings.WORKFLOW_MAX_CONCURRENCY,
+                    task_timeout_seconds=settings.WORKFLOW_TASK_TIMEOUT_SECONDS,
+                    task_max_retries=settings.WORKFLOW_TASK_MAX_RETRIES,
+                ),
+                resume=state.get("resume"),
+                on_settle=checkpoint_hook if (store and run_id) else None,
+            )
+        except CyclicDependencyError as e:
+            logger.error("Cyclic dependency detected", error=str(e))
+            await self._finalize_run(store, run_id, "failed", error=str(e))
+            raise
+        except ValueError as e:
+            logger.error("Invalid task DAG", error=str(e))
+            await self._finalize_run(store, run_id, "failed", error=str(e))
+            raise
+
+        for t in state["tasks"]:
+            res = report["results"].get(t["id"])
+            if res:
+                # 兜底字段：skip/timeout/异常结果补齐任务类型，保持结果结构完整
+                res.setdefault("task_type", t.get("task_type", "general"))
+                t["status"] = res.get("status", t.get("status", "pending"))
+
+        # results 与 tasks 同序对齐（归档/复盘依赖 zip(tasks, results)）
+        state["results"] = [report["results"][t["id"]] for t in state["tasks"]]
+        state["status"] = "executed"
+        await self._finalize_run(store, run_id, "completed")
+        logger.info("Task DAG finished", total=len(state["tasks"]),
+                    attempts=report["attempts"])
         return state
-    
-    async def _execute_by_type(self, task: Dict[str, Any], state: TaskPlanState) -> Dict[str, Any]:
+
+    async def _finalize_run(self, store, run_id: Optional[str],
+                            status: str, error: Optional[str] = None) -> None:
+        """台账收尾（尽力而为）。"""
+        if not (store and run_id):
+            return
+        try:
+            await store.finalize(run_id, status=status, error=error)
+        except Exception:
+            logger.exception("台账收尾失败（尽力而为）", run_id=run_id,
+                             status=status)
+
+    def _dag_runner(self):
+        """把单子任务执行适配为引擎的 run_task 签名 (task, ctx_map, attempt)。
+
+        ctx_map 仅含直接依赖且成功的任务结果 → 拼装为文本上下文。
+        """
+        async def run_task(task: Dict[str, Any],
+                           ctx_map: Dict[int, Dict[str, Any]],
+                           attempt: int) -> Dict[str, Any]:
+            context_text = "\n".join(
+                f"Task {dep_id}: {res.get('output', '')}"
+                for dep_id, res in sorted(ctx_map.items())
+            )
+            logger.info("Executing task", task_id=task["id"],
+                        title=task.get("title"), type=task.get("task_type"),
+                        attempt=attempt)
+            try:
+                return await self._run_single_task(task, context_text)
+            except Exception as e:  # 引擎仍有兜底，这里保证结果字段与旧版一致
+                logger.error("Task execution failed", task_id=task["id"], error=str(e))
+                return {
+                    "task_id": task["id"],
+                    "status": "failed",
+                    "output": f"执行失败: {str(e)}",
+                    "error": str(e),
+                    "task_type": task.get("task_type", "general"),
+                }
+        return run_task
+
+    async def _run_single_task(self, task: Dict[str, Any], context: str) -> Dict[str, Any]:
         """根据任务类型执行不同的逻辑"""
         task_type = task.get("task_type", "general")
         description = task.get("description", "")
-        
-        # 获取之前任务的结果作为上下文
-        previous_results = state.get("results", [])
-        context = "\n".join([f"Task {r['task_id']}: {r.get('output', '')}" for r in previous_results[-2:]])
         
         if task_type == "code_generation":
             # 代码生成任务 - 使用CoderAgent
@@ -507,12 +576,6 @@ class TaskPlannerWorkflow(BaseWorkflow):
                     "task_type": "general"
                 }
     
-    def check_next_task(self, state: TaskPlanState) -> str:
-        """检查是否还有任务需要执行"""
-        if state["current_task_index"] < len(state["tasks"]):
-            return "continue"
-        return "complete"
-    
     async def aggregate_results(self, state: TaskPlanState) -> TaskPlanState:
         """聚合所有任务结果"""
         logger.info("Aggregating results")
@@ -543,16 +606,35 @@ class TaskPlannerWorkflow(BaseWorkflow):
                 
                 # 会话记忆：构造注入或 initial_state["memory"] 配置
                 await self.ensure_memory(initial_state)
-                
+
+                # 运行台账：initial_state["checkpoint"] 注入 store + run_id
+                ckpt_cfg = initial_state.get("checkpoint") or {}
+                store = ckpt_cfg.get("store")
+                run_id = ckpt_cfg.get("run_id")
+
+                # 断点恢复：从台账载入 checkpoint（已终态任务/定义复用）
+                saved = None
+                if store and run_id:
+                    saved = await store.load_run(run_id)
+
                 # 初始化状态
                 state = TaskPlanState(
-                    user_input=initial_state.get("user_input", ""),
+                    user_input=saved["objective"] if (saved and saved.get("tasks"))
+                    else initial_state.get("user_input", ""),
                     tasks=[],
-                    current_task_index=0,
                     results=[],
                     status="pending",
-                    llm=self.llm
+                    llm=self.llm,
+                    checkpoint=ckpt_cfg if ckpt_cfg else None,
+                    resume=None,
                 )
+                if saved and saved.get("tasks"):
+                    state["tasks"] = sanitize_tasks(saved)
+                    state["resume"] = extract_resume(saved)
+                    logger.info("Resume workflow run from ledger",
+                                run_id=run_id,
+                                total=len(state["tasks"]),
+                                seeded=len(state["resume"]["results"]))
                 
                 # 编译并运行工作流
                 if not self.graph:
@@ -574,6 +656,8 @@ class TaskPlannerWorkflow(BaseWorkflow):
                     "failed_tasks": len([t for t in result["tasks"] if t["status"] == "failed"]),
                     "attempt": retry_count + 1
                 }
+                if ckpt_cfg and run_id:
+                    metadata["run_id"] = run_id
                 memory_meta = self.memory_info()
                 if memory_meta:
                     metadata["memory"] = memory_meta
@@ -617,7 +701,11 @@ class TaskPlannerWorkflow(BaseWorkflow):
                     f"Workflow execution failed (attempt {retry_count}/{self.max_retries})",
                     error=str(e)
                 )
-                
+                # 台账失败收尾（尽力而为），断点信息仍保留供后续续跑
+                _cfg = initial_state.get("checkpoint") or {}
+                await self._finalize_run(_cfg.get("store"), _cfg.get("run_id"),
+                                         "failed", error=str(e))
+
                 if retry_count < self.max_retries:
                     # 等待后重试
                     import asyncio

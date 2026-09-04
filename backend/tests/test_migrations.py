@@ -101,11 +101,34 @@ def _rag_unique_constraint():
         conn.close()
 
 
+def _columns(table):
+    conn = sqlite3.connect("_test_migrations.db")
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    finally:
+        conn.close()
+
+
+def _indexes(table):
+    conn = sqlite3.connect("_test_migrations.db")
+    try:
+        return {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?",
+                (table,),
+            )
+        }
+    finally:
+        conn.close()
+
+
 def test_sqlite_migration_creates_tables():
     run_alembic_upgrade()
     tables = _tables()
     check("迁移在 SQLite 下建表成功", "memory_entries" in tables)
     check("含全部业务表", {"users", "agents", "tasks", "conversations", "messages"} <= tables)
+    check("workflow_runs 台账表存在", "workflow_runs" in tables)
     idx = _memory_indexes()
     check("memory_entries 单列索引齐全", {"ix_memory_entries_user_id", "ix_memory_entries_session_id", "ix_memory_entries_memory_type", "ix_memory_entries_expires_at"} <= idx)
     check("memory_entries 复合索引存在", "ix_memory_user_strength_updated" in idx)
@@ -121,7 +144,27 @@ def test_sqlite_migration_creates_tables():
         "rag_documents 幂等唯一约束存在",
         "uq_rag_documents_user_checksum" in _rag_unique_constraint(),
     )
-    check("alembic_version 记录到 head", _alembic_version() == "0004")
+    check("alembic_version 记录到 head", _alembic_version() == "0007")
+    for tbl in ("agents", "tasks"):
+        cols = _columns(tbl)
+        idx = _indexes(tbl)
+        check(f"{tbl} 含 user_id 归属列", "user_id" in cols)
+        check(f"{tbl} user_id 索引存在", f"ix_{tbl}_user_id" in idx)
+    check("auth_sessions 会话表存在", "auth_sessions" in tables)
+    auth_cols = _columns("auth_sessions")
+    auth_idx = _indexes("auth_sessions")
+    check(
+        "auth_sessions 关键列齐全",
+        {"user_id", "family_id", "token_hash", "revoked_at"} <= auth_cols,
+    )
+    check(
+        "auth_sessions 索引齐全",
+        {
+            "ix_auth_sessions_user_id",
+            "ix_auth_sessions_family_id",
+            "uq_auth_sessions_token_hash",
+        } <= auth_idx,
+    )
 
 
 def test_init_db_idempotent():

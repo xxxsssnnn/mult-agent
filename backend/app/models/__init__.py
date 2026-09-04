@@ -4,6 +4,8 @@ from app.models.task import Task
 from app.models.conversation import Conversation, Message
 from app.models.memory_entry import MemoryEntry
 from app.models.rag_document import RAGDocument
+from app.models.workflow_run import WorkflowRun
+from app.models.auth_session import AuthSession
 
 __all__ = [
     "User",
@@ -13,4 +15,6 @@ __all__ = [
     "Message",
     "MemoryEntry",
     "RAGDocument",
+    "WorkflowRun",
+    "AuthSession",
 ]

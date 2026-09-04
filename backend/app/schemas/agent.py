@@ -26,6 +26,7 @@ class AgentUpdate(BaseModel):
 
 class AgentResponse(AgentBase):
     id: UUID
+    user_id: Optional[UUID] = None
     status: str
     config: Optional[Dict[str, Any]] = None
     created_at: datetime

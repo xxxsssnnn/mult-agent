@@ -38,3 +38,15 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     sub: str
     role: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+class MessageResponse(BaseModel):
+    message: str

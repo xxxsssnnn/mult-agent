@@ -27,6 +27,7 @@ class TaskResponse(TaskBase):
     id: UUID
     task_id: str
     agent_id: Optional[UUID] = None
+    user_id: Optional[UUID] = None
     status: str
     input_data: Optional[Dict[str, Any]] = None
     output_data: Optional[Dict[str, Any]] = None

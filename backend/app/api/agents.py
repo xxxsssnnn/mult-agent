@@ -12,6 +12,16 @@ from app.models.user import User
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
+def _owned_filter(current_user: User):
+    """非 admin 仅能访问自己的 Agent；admin 可全量访问。
+
+    存量无主数据（user_id IS NULL）对普通用户不可见，仅 admin 可见。
+    """
+    if current_user.role == "admin":
+        return None
+    return Agent.user_id == current_user.id
+
+
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     agent_data: AgentCreate,
@@ -25,7 +35,8 @@ async def create_agent(
         description=agent_data.description,
         config=agent_data.config,
         capabilities=agent_data.capabilities,
-        status="active"
+        status="active",
+        user_id=current_user.id
     )
     
     db.add(new_agent)
@@ -42,8 +53,12 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """列出所有Agent"""
-    result = await db.execute(select(Agent).offset(skip).limit(limit))
+    """列出当前用户的 Agent（admin 可见全量）"""
+    query = select(Agent)
+    ownership = _owned_filter(current_user)
+    if ownership is not None:
+        query = query.where(ownership)
+    result = await db.execute(query.offset(skip).limit(limit))
     agents = result.scalars().all()
     return agents
 
@@ -55,7 +70,11 @@ async def get_agent(
     current_user: User = Depends(get_current_active_user)
 ):
     """获取Agent详情"""
-    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    stmt = select(Agent).where(Agent.id == agent_id)
+    ownership = _owned_filter(current_user)
+    if ownership is not None:
+        stmt = stmt.where(ownership)
+    result = await db.execute(stmt)
     agent = result.scalar_one_or_none()
     
     if not agent:
@@ -75,7 +94,11 @@ async def update_agent(
     current_user: User = Depends(get_current_active_user)
 ):
     """更新Agent"""
-    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    stmt = select(Agent).where(Agent.id == agent_id)
+    ownership = _owned_filter(current_user)
+    if ownership is not None:
+        stmt = stmt.where(ownership)
+    result = await db.execute(stmt)
     agent = result.scalar_one_or_none()
     
     if not agent:
@@ -102,7 +125,11 @@ async def delete_agent(
     current_user: User = Depends(get_current_active_user)
 ):
     """删除Agent"""
-    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    stmt = select(Agent).where(Agent.id == agent_id)
+    ownership = _owned_filter(current_user)
+    if ownership is not None:
+        stmt = stmt.where(ownership)
+    result = await db.execute(stmt)
     agent = result.scalar_one_or_none()
     
     if not agent:
@@ -123,7 +150,11 @@ async def execute_agent(
     current_user: User = Depends(get_current_active_user)
 ):
     """执行Agent任务"""
-    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    stmt = select(Agent).where(Agent.id == agent_id)
+    ownership = _owned_filter(current_user)
+    if ownership is not None:
+        stmt = stmt.where(ownership)
+    result = await db.execute(stmt)
     agent = result.scalar_one_or_none()
     
     if not agent:

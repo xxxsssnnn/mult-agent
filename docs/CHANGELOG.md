@@ -5,6 +5,152 @@
 
 ---
 
+## 2026-09-04 CI 门禁：统一测试跑批 + 红灯拦截 + 提交前自检（评审阶段一收尾）
+
+**提交**：`-`（未提交；生产就绪评审驱动，对应"无 CI 门禁"问题项）
+
+**改了什么**：
+- `run_tests.ps1` 重写为统一门禁：后端套件由"手工维护清单"改为**自动发现**
+  `backend/tests/test_*.py`——实际发生过的"新增 `test_workflow_checkpoint.py` 却漏进
+  门禁"这类清单漂移不再可能；唯一排除项 `test_workflow_v2.py`（依赖真实 LLM Key 的
+  端到端冒烟脚本，仍可 `-Suite` 手动运行）
+- 红灯语义：任一套件失败 → 末尾红灯汇总并 `exit 1`；全部通过 → 绿灯 `exit 0`；
+  套件级 PASS/FAIL + 耗时明细，失败回显 exit code
+- 前端门禁：`frontend/node_modules` 存在时执行 `tsc --noEmit` 类型检查（当前绿）；
+  依赖未安装则明确 SKIP，不误伤纯后端环境（注：eslint 缺配置文件是既有基建缺口，
+  非本次评审引入，故门禁用 tsc 把关）
+- 单套件调试：`run_tests.ps1 -Suite xxx.py`
+- 新增 `install_git_hooks.ps1`：安装 `.git/hooks/pre-commit` 钩子，每次 `git commit`
+  自动跑全量门禁，红灯中止提交（`CI_SKIP=1` 可临时跳过，例如仅改文档）
+
+**为什么这么改**：评审要求"统一测试跑批 + 失败即红灯 + 提交前自检脚本"，把回归拦在
+合入主干之前；原跑批清单靠手工维护，已实际漂移一次（checkpoint 套件从未进门禁）。
+
+**解决了什么问题**：新增/新增断言套件被漏跑、回归漏网；代码不经任何自动检查即可提交。
+
+## 2026-09-04 认证闭环（阻断级安全修复）
+
+**提交**：`-`（未提交；生产就绪评审驱动，对应"认证未闭环"阻断项）
+
+**改了什么**：
+- `/auth/me` 修复：`Depends(lambda: None)` 占位 → `get_current_active_user`，真正返回当前用户
+- token 分型：access / refresh 携带 `type` + `jti` + `iat`；`deps.get_current_user` 只接受
+  access 型 Bearer——refresh token（7 天）不再可冒充 access（此前形同长命后门）
+- Refresh Token 落库台账：新增 `auth_sessions` 表（迁移 0007），只存 SHA-256 不落明文，
+  带 user_id / family_id / token_hash 索引，支持撤销、轮换与重用审计
+- `/auth/refresh`：轮换出新一对 token；旧行标记 `rotated` 并记录 `replaced_by` 去向；
+  **重用检测**——已吊销 token 再次出现时整族（family）会话吊销
+- `/auth/logout`：吊销当前设备 refresh（幂等；非本人 token 不生效，防止他人误杀会话）
+- `/auth/logout-all`：吊销该用户全部会话；access 短窗口（ACCESS_TOKEN_EXPIRE_MINUTES）属预期
+- login 顺带清理本人已过期的会话行，台账不无限膨胀
+- 测试：新增 `tests/test_auth_closure.py`（23 项 HTTP 级断言，全链路含启动迁移），
+  接入 `run_tests.ps1`；`test_migrations.py` 断言更新至 head=0007
+
+**为什么这么改**：评审指出 `/auth/me` 是占位实现，refresh token 签发后无刷新端点、撤销、
+轮换与会话管理，认证链路只走通一半。
+
+**解决了什么问题**：登录态自我查询失效；refresh token 可用作任意接口凭证的长命后门；
+账号安全事件后无法吊销会话（只能等 7 天自然过期）。
+
+## 2026-09-04 租户隔离 Phase 1：Agent/Task 所有权（阻断级安全修复）
+
+**提交**：`-`（未提交；生产就绪评审驱动，对应"多租户越权"阻断项）
+
+**改了什么**：
+- 所有权模型：`Agent` / `Task` 新增 `user_id` 归属列（Uuid、可空 FK `users.id`、带索引）；
+  `AgentResponse` / `TaskResponse` 暴露 `user_id`
+- 隔离语义：非 admin 用户 list/get/update/delete/cancel/execute 只命中本人资源，
+  越权访问一律 404（不泄露资源存在性）；admin 全量可见
+- 创建路径：创建 Agent/Task 强制写入 `current_user.id`；创建 Task 引用他人 Agent → 404
+- workflow 归档 `_archive_run` 为父/子任务写入 `user_id`，堵住 tasks 表 SQL 层跨用户可见的泄漏口
+- 存量数据决策：不 backfill。隔离前的无主记录（user_id IS NULL）普通用户不可见、
+  仅 admin 可见，避免历史数据在修复上线瞬间跨用户泄漏
+- 迁移 `0006_add_owner_columns_agents_tasks`：SQLite 走 batch（复制建表，规避方言
+  ADD COLUMN 不支持内联外键的限制），PG 下等价直接 ALTER；FK 显式命名
+- 测试：新增 `tests/test_task_agent_ownership.py`（31 项断言：双用户 + admin + 无主
+  存量 + 归档归属），接入 `run_tests.ps1`；`test_migrations.py` 断言更新至 head=0006
+
+**为什么这么改**：生产就绪评审指出 Agent/Task 接口只要求登录、未绑定当前用户，
+登录用户可读取/操作他人资源；RAG/记忆模块已做用户隔离，基础资源模块需统一收口。
+
+**解决了什么问题**：Agent/Task 跨用户越权读改删；workflow 归档任务可被任意用户读取。
+
+## 2026-09-03 Workflow 执行引擎（DAG 依赖解析 + 有界并行 + 子任务超时/重试）
+
+**提交**：`-`（未提交；计划见 docs/superpowers/plans/2026-09-03-workflow-execution-engine.md，
+配套测试见 tests/test_workflow_execution.py）
+
+**改了什么**：
+- 新模块 `workflows/execution.py`：纯异步 DAG 执行引擎（零外部依赖，可离线单测）。
+  语义：校验（id 唯一/依赖存在）→ 循环依赖检测（`CyclicDependencyError`）→
+  依赖就绪调度 + 有界并发窗口 + priority 降序；每个子任务独立超时
+  （`asyncio.wait_for`）与失败重试（attempt 递增，默认额外重试 1 次）；
+  下游 context = **仅直接依赖且成功**的任务结果；`skip_on_failure=True` 时
+  失败依赖的下游被跳过（默认关闭，保持"尽力继续"语义）
+- `workflows/task_planner.py`：LangGraph 图由"顺序自循环"改为阶段状态机
+  `analyze_task → run_dag → aggregate_results`；删除 `execute_task` /
+  `check_next_task` / `TaskPlanState.current_task_index`；`_execute_by_type`
+  重构为 `_run_single_task(task, context_text)`，context 由引擎按依赖注入
+- `core/config.py`：新增 `WORKFLOW_MAX_CONCURRENCY`（默认 2）/
+  `WORKFLOW_TASK_TIMEOUT_SECONDS`（默认 120）/
+  `WORKFLOW_TASK_MAX_RETRIES`（默认 1）
+- 测试：`tests/test_workflow_execution.py`（50 项断言，纯离线）覆盖
+  校验/环检测/顺序/依赖就绪/context 精确传递/priority/并发窗口与补位/超时/
+  重试成功与耗尽/关闭重试/skip 语义/TaskPlanner 集成契约（tasks-results 对齐、
+  metadata.recap、无 pending 残留）
+
+**为什么这么改**：
+- 编排此前是 LangGraph 顺序 for 循环：`SubTask.dependencies` 被 LLM 产出却从未
+  解析使用，互不依赖的子任务无法并行，单任务挂死会拖死整条链，失败只能整轮重跑
+- 目标对齐业界先进水平（企业级编排路线图阶段 1）：DAG 化 + 有界并行 +
+  子任务级护栏是 checkpoint 持久化 / 断点恢复 / human-in-the-loop 的前置
+
+**解决了什么问题**：
+- 独立子任务现在可并行执行（并发上限可配），严格串行的依赖链不再整体阻塞
+- 子任务级超时 + 重试：局部故障自动补救，不再需要整轮重跑已完成任务
+- 依赖语义真正生效：下游只拿到它声明的直接依赖输出，为真实 DAG 调度打底
+
+---
+
+## 2026-09-03 Workflow 答案语义检索增强（执行档案向量索引）
+
+**提交**：`-`（未提交；配套测试见 tests/test_workflow_answer_search.py，文档见 WORKFLOW_ANSWER_SEARCH_GUIDE.md）
+
+**改了什么**：
+- 新模块 `workflows/answer_store.py`：`WorkflowAnswerStore` 把一次 workflow 归档展开为
+  「1 条父任务复盘 + N 条子任务结果」文档向量化，落盘独立 Chroma collection
+  （`wf_answers`），按 `metadata.user_id` 租户隔离；提供 `index_run` /
+  `search`（含 workflow_label/status 过滤）/ `remove_task` / `count`，全部
+  失败静默降级不阻断主流程
+- `api/workflows.py`：`_archive_run` 新增 `user_id`——归档**落库成功后**自动把
+  执行答案语义索引（尽力而为，索引失败仅告警，不影响归档返回）；新增
+  `GET /workflows/answers/search`：自然语言检索当前用户的历史执行答案，
+  支持 `limit` / `workflow_label` / `status` 过滤；索引不可用返回
+  `available=False` 优雅降级
+- `core/config.py`：新增 `WORKFLOW_ANSWER_INDEX_ENABLED` /
+  `WORKFLOW_ANSWER_PERSIST_DIRECTORY`（默认 `./wf_answer_db`，独立于 RAG
+  `chroma_db`，避免同目录多 PersistentClient 锁冲突）/
+  `WORKFLOW_ANSWER_COLLECTION`
+- Embedding 复用 RAG 配置（`RAG_EMBEDDING_MODEL_TYPE/NAME`），不新增模型
+- 测试：`tests/test_workflow_answer_search.py`（40 项断言，纯离线）覆盖文档展开、
+  索引/检索/跨用户隔离/过滤/删除/幂等、embedding 失败降级、归档自动索引（含
+  user_id 透传）、检索端点鉴权与参数透传、后端不可用降级
+
+**为什么这么改**：
+- workflow 归档此前虽已写入 `tasks` 表，但 tasks 无用户字段、只能按标题翻列表，
+  长任务执行答案“可查但不好找”；而短/长程记忆只覆盖近窗口会话，无法回答
+  “上次代码审查结论是什么”“上个月那次任务规划失败原因”
+- 不直接复用 memory/vector_store：排查发现该模块仍按 RAG 多租户重构前的旧签名
+  `VectorStoreManager(collection_name=...)` 调用，在本分支已静默失效（异常被吞），
+  且 tasks 无 user_id；故建独立、自洽、按用户隔离的答案索引，并在独立目录落盘
+
+**解决了什么问题**：
+- 执行答案从“只能翻标题”升级为“可语义追问”：多轮 KB 会话（Phase 5）之外，
+  用户/上层可凭自然语言按用户找回历史 workflow 答案，为后续“让 RAG/记忆
+  引用历史执行结果”预留干净的入口
+
+---
+
 ## 2026-09-03 RAG 会话版问答（Phase 5：多轮 KB 问答）
 
 **提交**：`b5b2f2a`（配套测试 `6cb9ed0`；配套文档见 RAG_USAGE_GUIDE v1.2）

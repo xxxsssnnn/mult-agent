@@ -25,10 +25,15 @@ async def get_current_user(
         payload = decode_token(token)
         if payload is None:
             raise credentials_exception
-        
+
+        # 仅接受 access 型 token 作为 Bearer；refresh token 走独立 /auth/refresh，
+        # 禁止用 refresh token 冒充访问令牌（其有效期更长，等同长命后门）。
+        if payload.get("type") != "access":
+            raise credentials_exception
+
         username: str = payload.get("sub")
         role: str = payload.get("role")
-        
+
         if username is None or role is None:
             raise credentials_exception
     except JWTError:

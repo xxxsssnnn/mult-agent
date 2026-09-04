@@ -6,6 +6,7 @@ import {
   TagsOutlined,
   MessageOutlined,
   DatabaseOutlined,
+  FileSearchOutlined,
   LogoutOutlined,
 } from '@ant-design/icons'
 import { useState } from 'react'
@@ -37,6 +38,11 @@ const menuItems = [
     key: '/memories',
     icon: <DatabaseOutlined />,
     label: '记忆管理',
+  },
+  {
+    key: '/knowledge',
+    icon: <FileSearchOutlined />,
+    label: '知识库问答',
   },
 ]
 

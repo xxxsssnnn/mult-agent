@@ -61,7 +61,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
 
 ```bash
 curl -X POST "http://localhost:8001/api/v1/rag/ingest" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -F "file=@document.pdf" \
   -F "collection_name=my_knowledge_base"
 ```
@@ -77,7 +77,7 @@ curl -X POST "http://localhost:8001/api/v1/rag/ingest" \
 ```bash
 curl -X POST "http://localhost:8001/api/v1/rag/query" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -d '{
     "query": "如何使用Python实现RAG？",
     "collection_name": "my_knowledge_base",
@@ -108,14 +108,14 @@ curl -X POST "http://localhost:8001/api/v1/rag/query" \
 
 ```bash
 curl -X GET "http://localhost:8001/api/v1/rag/stats/my_knowledge_base" \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -H "Authorization: Bearer <YOUR_TOKEN>"
 ```
 
 #### 清空知识库
 
 ```bash
 curl -X DELETE "http://localhost:8001/api/v1/rag/clear/my_knowledge_base" \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -H "Authorization: Bearer <YOUR_TOKEN>"
 ```
 
 ### 方法2：通过Python代码

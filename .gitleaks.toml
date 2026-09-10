@@ -1,0 +1,23 @@
+# gitleaks 配置：保留官方默认规则，仅对"文档示例 / 测试夹具中的显式占位符"做窄口径放行。
+# 理由与维护规则见 docs/SECURITY_DEBT.md。
+#
+# 设计原则：不放宽任何规则、不放行任何整路径，只按"行内字面占位符串"放行。
+# 这样真实凭据（不会包含这些占位符字面量）依然会被拦住。
+title = "multi-agent gitleaks config"
+
+[extend]
+# 继承 gitleaks 官方默认规则集，只做增量豁免
+useDefault = true
+
+[allowlist]
+description = "意图明确的占位符（文档示例、测试夹具），非真实凭据"
+regexTarget = "line"
+regexes = [
+  # 历史提交中的 curl 示例占位 token（当前文件已统一为 <YOUR_TOKEN>，
+  # 但已提交的旧版本不可变，仍需放行，否则全量历史扫描会持续报错）
+  '''Authorization:\s*Bearer\s+YOUR_TOKEN''',
+  # 文档中的 OpenAI API Key 占位符
+  '''sk-your(?:-api)?-key-here''',
+  # 测试夹具的固定假密钥（backend/tests/pytest_suite/conftest.py）
+  '''pytest-secret-key-0123456789abcdef-0123456789''',
+]

@@ -5,6 +5,56 @@
 
 ---
 
+## 2026-09-10 CI 第二轮：gitleaks 误报修复
+
+**提交**：本次提交（gitleaks 误报修复）
+
+**改了什么**：CI 第二个 run（`de501eb`）的失败点**不是依赖扫描，而是 gitleaks**。
+本地按 CI 的实际工具版本复现后，修掉 13 条误报，并把扫描范围拉回可控：
+
+- **文档占位符统一为 `<YOUR_TOKEN>`**（12 处）：`QUICKSTART.md`、
+  `WORKFLOW_IMPLEMENTATION.md`、`docs/RAG_USAGE_GUIDE.md`、
+  `docs/RAG_IMPLEMENTATION_SUMMARY.md`、`docs/WORKFLOW_V2_COMPLETION_REPORT.md`
+  中的 `Authorization: Bearer YOUR_TOKEN` → `Bearer <YOUR_TOKEN>`，
+  与仓库里已有的 `Bearer <token>` 写法保持一致。
+- **测试夹具显式放行**：`backend/tests/pytest_suite/conftest.py` 的固定假 `SECRET_KEY`
+  保留原值（测试需要足够熵的值），加 gitleaks 官方行内放行 `# gitleaks:allow`。
+- **新增 `.gitleaks.toml`**：继承官方全部规则（`[extend] useDefault = true`），
+  只加 3 条**按行匹配**的字面占位符 allowlist。作用是兜住**不可变的历史提交** ——
+  旧 blob 里仍有 `Bearer YOUR_TOKEN`，改文件消不掉它们。
+- **security 任务补 `fetch-depth: 0`**：原先的浅克隆让 gitleaks-action
+  **退化为"整个项目快照"扫描**，而不是按 push 范围扫描。
+
+**为什么这么改**：这次失败的成因有两个，都不是"代码里有真凭据"：
+
+1. **规则集版本决定结论**。本机原有的 gitleaks 8.18.4 扫全量历史是 **0 命中**，
+   而 gitleaks-action 实际用的 **8.30.1 报 13 条** —— `curl-auth-header`
+   是较新版本才加入的规则。"本地扫过没问题"在这里是个假阴性。
+2. **浅克隆改变扫描范围**。实测本次推送范围（`a71235c..de501eb`）本身是 **0 命中**，
+   但 CI 仍报 leaks，说明它扫的不是这个范围，而是整个项目快照。
+
+**解决了什么问题**：CI 安全任务的红灯从"必然失败"收敛为"仅剩已定位并留档的误报"。
+实证（均用 8.30.1，且**不显式指定配置**，以复现 CI 的自动探测行为）：
+
+- 修复前：全量历史 `exit 1`，13 条命中
+- 修复后：全量历史 `exit 0`、工作树 `exit 0`，非 vendor 命中 **0**
+- **反向对照**（证明 allowlist 没把扫描器变成摆设）：临时目录放入真实形态的
+  高熵密钥 → 仍被 `generic-api-key` 捕获；同时放入 `Bearer <YOUR_TOKEN>` 与
+  `sk-your-key-here` → 0 命中
+- 完整门禁 `27/27 通过`（150.7s）
+
+**已核实的 CI 现状**（通过公开的 Actions 页面核实；本机无 GitHub CLI，公共 API 被限流）：
+
+| Run | Commit | 后端测试 | 前端检查 | 安全扫描 | Docker 构建 |
+| --- | --- | --- | --- | --- | --- |
+| #1 | `a71235c` | 通过 | 通过 | **失败**（pip-audit，当时依赖基线尚未落地） | 通过 |
+| #2 | `de501eb` | 通过 | 通过 | **失败**（gitleaks 误报） | **通过** |
+
+两个结论：依赖基线豁免已经放行（否则 gitleaks 之前的步骤就会失败）；
+**两个镜像都能成功构建**，"Docker Build 未验证"这个未知项就此消掉。
+
+---
+
 ## 2026-09-10 CI 安全门禁落地：依赖漏洞基线与安全债台账
 
 **提交**：本次提交（CI 安全门禁基线豁免）

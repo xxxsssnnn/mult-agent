@@ -16,5 +16,6 @@ if str(BACKEND_ROOT) not in sys.path:
 # 必须早于任何 app 模块导入：固定测试环境，避免误连外部依赖 / 生产配置
 os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("DEBUG", "False")
-os.environ.setdefault("SECRET_KEY", "pytest-secret-key-0123456789abcdef-0123456789")
+# SECRET_KEY 为测试夹具固定值（非真实凭据）；gitleaks 需在同一行显式放行，理由见 docs/SECURITY_DEBT.md
+os.environ.setdefault("SECRET_KEY", "pytest-secret-key-0123456789abcdef-0123456789")  # gitleaks:allow
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./_pytest_smoke.db")

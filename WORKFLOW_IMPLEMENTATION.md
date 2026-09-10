@@ -164,7 +164,7 @@ print(f"Approved: {result['approved']}")
 ```bash
 # 测试代码审查工作流
 curl -X POST http://localhost:8000/api/v1/workflows/code-review \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "requirement": "创建一个Python装饰器，用于缓存函数结果",
@@ -174,7 +174,7 @@ curl -X POST http://localhost:8000/api/v1/workflows/code-review \
 
 # 测试任务规划工作流
 curl -X POST http://localhost:8000/api/v1/workflows/task-planner \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "user_input": "开发一个博客系统，包括文章管理、评论、标签功能"
@@ -182,7 +182,7 @@ curl -X POST http://localhost:8000/api/v1/workflows/task-planner \
 
 # 获取工作流信息
 curl -X GET http://localhost:8000/api/v1/workflows/info \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -H "Authorization: Bearer <YOUR_TOKEN>"
 ```
 
 ### 6. 运行示例

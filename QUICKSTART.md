@@ -173,7 +173,7 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
 ### 3. 创建Agent
 ```bash
 curl -X POST http://localhost:8000/api/v1/agents \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Test Coder",

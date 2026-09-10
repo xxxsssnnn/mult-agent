@@ -135,7 +135,57 @@ CI 的 bandit 步骤（`bandit -r backend/app -ll`）当前为全绿。其中有
 该豁免以 `# nosec B104` 标注，理由另起一行写成普通注释（而不是写在 `# nosec` 后面，
 否则 bandit 会把行内注释当成测试名解析并产生 warning）。
 
-## 8. 复核节奏与退出条件
+## 8. gitleaks 误报与配置豁免
+
+### 背景
+
+CI 第二个 run（`de501eb`）的失败点不是依赖扫描，而是 gitleaks 报 `Leaks detected`。
+按 CI 实际使用的版本（8.30.1）本地复现后，确认是 **13 条误报**，全部来自文档示例与测试夹具：
+
+| 规则 | 数量 | 位置 | 性质 |
+| --- | --- | --- | --- |
+| `curl-auth-header` | 12 | `QUICKSTART.md`、`WORKFLOW_IMPLEMENTATION.md`、`docs/RAG_USAGE_GUIDE.md`、`docs/RAG_IMPLEMENTATION_SUMMARY.md`、`docs/WORKFLOW_V2_COMPLETION_REPORT.md` | curl 示例中的 `Authorization: Bearer YOUR_TOKEN` |
+| `generic-api-key` | 1 | `backend/tests/pytest_suite/conftest.py:19` | 测试夹具的固定假 `SECRET_KEY` |
+
+定位过程中有两个值得记住的结论：
+
+1. **规则集版本会改变结论**。本机原有的 gitleaks 8.18.4 扫全量历史是 0 命中，
+   换到 8.30.1 才报出这 13 条 —— `curl-auth-header` 是较新版本加入的规则。
+   所以"本地扫过没问题"不能替代"用 CI 的实际版本扫一遍"。
+2. **浅克隆会改变扫描范围**。security 任务的 `actions/checkout` 缺 `fetch-depth: 0`，
+   浅克隆下 gitleaks-action 退化为"整个项目快照"扫描。
+   实测本次推送范围（`a71235c..de501eb`）本身 0 命中，CI 却报 leaks，正是这个原因。
+
+### 处理方式
+
+1. **修内容**：12 处 curl 示例统一改为 `Authorization: Bearer <YOUR_TOKEN>`，
+   与仓库已有的 `Bearer <token>` 写法一致；`conftest.py` 的假密钥保留原值
+   （测试需要足够熵的值），改用官方行内机制 `# gitleaks:allow` 放行。
+
+2. **加配置**（`/.gitleaks.toml`）：已提交的旧 blob 里仍有 `Bearer YOUR_TOKEN`，
+   改文件无法消除它们，必须靠配置兜住。配置刻意做成**窄口径**：
+
+   | 项 | 取值 | 设计意图 |
+   | --- | --- | --- |
+   | `[extend] useDefault` | `true` | 继承官方全部规则，不放宽任何规则 |
+   | `regexTarget` | `line` | 按行内容匹配，而不是按路径整体放行 |
+   | `regexes` | 3 条字面占位符 | 只放行 `YOUR_TOKEN` / `sk-your-key-here` / 该测试假密钥 |
+
+   真实凭据不会包含这些占位符字面量，因此放行范围是可控的。
+
+3. **补 `fetch-depth: 0`**：让 gitleaks-action 能按 push 范围精确扫描，
+   而不是退化为全量快照扫描。
+
+### 实证
+
+| 场景 | 结果 |
+| --- | --- |
+| 修复前，8.30.1 全量历史 | `exit 1`，13 条命中 |
+| 修复后，全量历史 / 工作树 | 均 `exit 0`，非 vendor 命中 0 |
+| 反向对照：真实形态的高熵密钥 | 仍被 `generic-api-key` 捕获（证明扫描器没变成摆设） |
+| 反向对照：`Bearer <YOUR_TOKEN>` 与 `sk-your-key-here` | 0 命中（证明放行是窄口径的） |
+
+## 9. 复核节奏与退出条件
 
 - **节奏**：每季度复核一次；任何依赖升级完成后立即复核并删除已解除条目。
 - **新增豁免门槛**：默认禁止。只有"上游确实没有修复版本"才允许新增，
@@ -143,3 +193,5 @@ CI 的 bandit 步骤（`bandit -r backend/app -ll`）当前为全绿。其中有
 - **退出条件**：本台账清空（`security/pip-audit-baseline.txt` 与
   `security/audit-ci.json` 的 `allowlist` 均为空）时，删除本节第 1 节所述的
   过渡机制，恢复为纯门禁。**基线为空即为目标态**。
+- **gitleaks 配置的退出条件**：当仓库内不再需要放行任何占位符
+  （即 `.gitleaks.toml` 的 `regexes` 可清空）时，删除该配置文件，回到纯默认规则集。

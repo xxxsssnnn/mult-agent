@@ -212,7 +212,7 @@ uvicorn app.main:app --reload
 ```bash
 curl -X POST "http://localhost:8001/api/v1/workflows/task-planner" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -d '{
     "user_input": "开发一个待办事项应用"
   }'
@@ -222,7 +222,7 @@ curl -X POST "http://localhost:8001/api/v1/workflows/task-planner" \
 ```bash
 curl -X POST "http://localhost:8001/api/v1/workflows/code-review" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -d '{
     "requirement": "实现快速排序算法",
     "language": "python",

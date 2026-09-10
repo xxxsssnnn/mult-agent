@@ -297,7 +297,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
 
 ```bash
 curl -X POST "http://localhost:8001/api/v1/rag/ingest" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -F "file=@my_document.pdf" \
   -F "collection_name=my_kb"
 ```
@@ -307,7 +307,7 @@ curl -X POST "http://localhost:8001/api/v1/rag/ingest" \
 ```bash
 curl -X POST "http://localhost:8001/api/v1/rag/query" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -d '{
     "query": "文档中说了什么？",
     "collection_name": "my_kb"

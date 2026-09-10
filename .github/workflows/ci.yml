@@ -104,7 +104,11 @@ jobs:
     name: Security & Dependency Scan
     runs-on: ubuntu-latest
     steps:
+      # gitleaks-action 需要完整历史才能按 push 范围精确扫描；
+      # 浅克隆会让它退化为"整个项目快照"扫描，误报历史文档里的占位符。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5

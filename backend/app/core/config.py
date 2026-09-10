@@ -7,10 +7,14 @@ load_dotenv()
 class Settings:
     APP_NAME: str = os.getenv("APP_NAME", "Multi-Agent Platform")
     APP_VERSION: str = os.getenv("APP_VERSION", "1.0.0")
-    DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
+    # 运行环境: development / production。production 会启用额外安全校验（见 validate）
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+    # 安全默认：DEBUG 默认关闭，避免生产误开（本地开发可显式 DEBUG=True）
+    DEBUG: bool = os.getenv("DEBUG", "False").lower() == "true"
     API_V1_PREFIX: str = os.getenv("API_V1_PREFIX", "/api/v1")
-    
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/multi_agent")
+
+    # 默认不含固定数据库口令；需要口令时请在环境变量中显式提供强口令
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres@localhost:5432/multi_agent")
     DATABASE_ECHO: bool = os.getenv("DATABASE_ECHO", "False").lower() == "true"
     
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -146,6 +150,54 @@ class Settings:
     # 子任务失败后的额外重试次数（总尝试 = 该值 + 1）
     WORKFLOW_TASK_MAX_RETRIES: int = int(os.getenv("WORKFLOW_TASK_MAX_RETRIES", "1"))
 
+    # --- 生产环境安全校验 ---
+    # 明显不安全 / 示例用的值（生产环境一律拒绝）
+    INSECURE_SECRET_KEYS: tuple = (
+        "",
+        "your-secret-key-change-in-production",
+        "changeme",
+        "change-me",
+        "secret",
+        "test",
+    )
+    INSECURE_DB_PASSWORDS: tuple = (
+        "postgres",
+        "password",
+        "changeme",
+        "change-me",
+        "123456",
+        "root",
+    )
+
+    @property
+    def is_production(self) -> bool:
+        return str(self.ENVIRONMENT).strip().lower() in ("prod", "production")
+
+    def validate(self) -> None:
+        """启动期配置校验（fail fast）。
+
+        开发环境保持宽松，便于本地起服务；**生产环境**必须拒绝一切不安全默认值，
+        发现即抛 RuntimeError 让进程启动失败，避免带病上线。
+        """
+        if not self.is_production:
+            return
+        errors: list = []
+        if self.DEBUG:
+            errors.append("DEBUG 必须在生产环境关闭（设置 DEBUG=False）")
+        if self.SECRET_KEY in self.INSECURE_SECRET_KEYS or len(self.SECRET_KEY) < 32:
+            errors.append("SECRET_KEY 使用了默认/弱密钥，请配置至少 32 位的随机字符串")
+        if not self.DATABASE_URL:
+            errors.append("DATABASE_URL 未配置")
+        else:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(
+                self.DATABASE_URL.replace("+asyncpg", "").replace("+aiosqlite", "")
+            )
+            if parsed.password in self.INSECURE_DB_PASSWORDS:
+                errors.append("DATABASE_URL 使用了默认数据库口令，请改用强口令")
+        if errors:
+            raise RuntimeError("生产环境配置校验失败：\n  - " + "\n  - ".join(errors))
 
 
 settings = Settings()

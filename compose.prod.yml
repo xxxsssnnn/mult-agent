@@ -1,0 +1,236 @@
+# 生产环境编排（加固版）。
+# 与 docker-compose.yml（开发环境：含源码挂载 / --reload / 数据库端口公网暴露）严格分离。
+#
+# 使用：
+#   1) cp .env.prod.example .env.prod 并填入强口令与随机 SECRET_KEY
+#   2) docker compose -f compose.prod.yml --env-file .env.prod up -d --build
+#
+# 加固要点：
+#   - 数据库/Redis/ChromaDB 不映射公网端口，仅存在于 internal 网络
+#   - 后端不挂载源码、不使用 --reload
+#   - 全部服务非 root 运行 + no-new-privileges
+#   - 显式 CPU/内存/并发限制
+#   - ChromaDB 固定版本（与后端 chromadb==1.5.9 对齐）
+name: multi-agent-prod
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-multi_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须通过 .env.prod 设置 POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [data_net]
+    # 不发布端口：仅容器网络内可达
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-multi_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?必须通过 .env.prod 设置 REDIS_PASSWORD}
+    # 启用密码保护；不发布端口
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks: [data_net]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+    security_opt:
+      - no-new-privileges:true
+
+  chromadb:
+    # 固定版本：需与 backend 的 chromadb==1.5.9 保持一致
+    image: chromadb/chroma:1.5.9
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+    volumes:
+      - chroma_data:/data
+    networks: [data_net]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "False"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-multi_agent}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+    # 仅绑定本机回环，避免 API 直接暴露公网（外部经前端 nginx 反代 /api）
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # 生产：不挂载源码、不 --reload
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "2"
+      - --limit-concurrency
+      - "200"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.25"
+          memory: 256m
+    security_opt:
+      - no-new-privileges:true
+    networks: [data_net, edge_net]
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "False"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-multi_agent}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - celery
+      - -A
+      - app.core.celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=2
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    security_opt:
+      - no-new-privileges:true
+    networks: [data_net]
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "False"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-multi_agent}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - celery
+      - -A
+      - app.core.celery_app
+      - beat
+      - --loglevel=info
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256m
+    security_opt:
+      - no-new-privileges:true
+    networks: [data_net]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    security_opt:
+      - no-new-privileges:true
+    networks: [edge_net]
+
+networks:
+  # 对外/服务间交互网（前端 <-> 后端）
+  edge_net:
+    driver: bridge
+  # 数据网：internal，禁止外部直接访问数据库/缓存/向量库
+  data_net:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:

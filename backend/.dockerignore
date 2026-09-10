@@ -1,0 +1,16 @@
+# 构建上下文排除项：减小镜像、避免泄露本地文件
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+tests/
+.env
+.env.*
+*.sqlite3
+*.db
+.git/

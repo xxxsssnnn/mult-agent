@@ -1,5 +1,5 @@
-version: '3.8'
-
+# 开发环境编排（含源码挂载与热重载）。
+# 生产环境请使用 compose.prod.yml（非 root、无源码挂载、数据服务不暴露端口）。
 services:
   # PostgreSQL数据库
   postgres:
@@ -36,7 +36,8 @@ services:
 
   # ChromaDB向量数据库
   chromadb:
-    image: chromadb/chroma:latest
+    # 固定版本，避免 latest 漂移
+    image: chromadb/chroma:1.5.9
     container_name: multi-agent-chromadb
     ports:
       - "8001:8000"
@@ -47,7 +48,7 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     container_name: multi-agent-backend
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/multi_agent
@@ -71,7 +72,7 @@ services:
   worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     container_name: multi-agent-worker
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/multi_agent
@@ -85,13 +86,13 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    command: celery -A app.celery_app worker --loglevel=info
+    command: celery -A app.core.celery_app worker --loglevel=info
 
   # Celery Beat（定时调度：记忆衰减等）
   beat:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     container_name: multi-agent-beat
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/multi_agent
@@ -105,7 +106,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    command: celery -A app.celery_app beat --loglevel=info
+    command: celery -A app.core.celery_app beat --loglevel=info
 
   # 前端服务
   frontend:
@@ -114,7 +115,7 @@ services:
       dockerfile: Dockerfile
     container_name: multi-agent-frontend
     ports:
-      - "3000:80"
+      - "3000:8080"
     depends_on:
       - backend
 

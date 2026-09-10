@@ -29,8 +29,10 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Enterprise Multi-Agent Collaboration Platform",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    # 生产环境关闭交互式文档与 OpenAPI schema，减少信息暴露面
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None if settings.is_production else "/redoc",
+    openapi_url=None if settings.is_production else "/openapi.json",
 )
 
 # 配置CORS
@@ -73,7 +75,9 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """应用启动时执行"""
-    logger.info("Application starting up")
+    # fail fast：生产环境下拒绝默认 JWT 密钥 / 默认数据库口令 / 开启的 DEBUG
+    settings.validate()
+    logger.info("Application starting up", environment=settings.ENVIRONMENT)
     # 建表兜底（生产环境建议使用 alembic 迁移）
     from app.core.database import init_db
     await init_db()
@@ -88,9 +92,12 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
+
+    # B104 精确豁免（容器内需监听所有接口）：外部暴露面由 compose 的端口映射与
+    # 网络策略控制（生产仅前端 8080 对外，后端绑定回环），应用侧不做额外收敛。
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
+        host="0.0.0.0",  # nosec B104
         port=8000,
         reload=settings.DEBUG
     )

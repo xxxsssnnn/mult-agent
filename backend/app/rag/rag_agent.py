@@ -999,7 +999,8 @@ class RAGAgent(BaseAgent):
             return f"chunk:{chunk_id}"
         import hashlib
 
-        return "hash:" + hashlib.sha1(
+        # SHA-256：仅作跨查询变体去重的定长身份（非安全用途）
+        return "hash:" + hashlib.sha256(
             (doc.page_content or "").encode("utf-8")
         ).hexdigest()
 

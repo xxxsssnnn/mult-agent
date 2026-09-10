@@ -110,7 +110,8 @@ class SemanticCache:
     ) -> str:
         """缓存键。extra 用于区分影响答案内容的管道差异（如是否经重排）。"""
         raw = f"{user_id}|{search_type}|{k}|{extra}|{query.strip()}"
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+        # SHA-256：仅作定长键（非安全用途），同时避免弱哈希被静态扫描判为高危
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
     def profile(k: int, search_type: str, extra: str = "") -> str:

@@ -5,6 +5,98 @@
 
 ---
 
+## 2026-09-10 上线阻断项修复：生产 Celery 启动路径 + Bandit 扫描全绿
+
+**提交**：`-`（未提交；上线阻断项评审）
+
+**改了什么**：
+
+- **生产 Celery 启动路径修正**：worker / beat 启动命令由 `-A app.celery_app` 改为
+  `-A app.core.celery_app`。实际模块是 `backend/app/core/celery_app.py`，`app.celery_app`
+  并不存在 —— 后果是生产 API 可正常启动，但**异步 Worker 与定时 Beat 启动即
+  `ModuleNotFoundError`**（任务全部投不出去）。覆盖 `compose.prod.yml`、`docker-compose.yml`，
+  以及 3 处会误导后来者的文档字符串 / 注释（`app/core/celery_app.py`、`app/tasks/memory_tasks.py`、
+  `tests/test_celery_registration.py`）。
+  实证（不依赖 Docker）：用 `celery.app.utils.find_app` 直接解析启动路径 ——
+  `app.core.celery_app` 成功（main=`multi_agent`、include=`['app.tasks.memory_tasks']`、9 个任务），
+  `app.celery_app` 抛 `ModuleNotFoundError`。
+
+- **Bandit 高危 / 中危项清零**：`bandit -r backend/app -ll` 由 **exit 1** 变为
+  **exit 0（No issues identified）**，远程 CI 的安全步骤不再必然红灯。
+  - `app/rag/cache.py:113`、`app/rag/rag_agent.py:1002`：两处 SHA-1 经核实均为**非安全用途**
+    （前者是缓存键，后者是跨查询变体去重的定长身份，均在进程内、无持久化契约），
+    统一改用 **SHA-256** 并补注释说明用途；同步修正那条断言键长为 40 的用例
+    （`tests/test_rag_hybrid_cache.py`，改为 SHA-256 的 64）。
+  - `app/main.py`：`uvicorn.run(host="0.0.0.0")` 的 B104 做**精确豁免**（`# nosec B104`），
+    豁免理由独立成行写明（容器内需监听所有接口，外部暴露面由 compose 端口映射与网络策略控制）。
+    理由行不写在 `# nosec` 同一行 —— 否则 bandit 会把中文说明里的英文词当成测试名解析并告警。
+
+**为什么这么改**：评审给出两条上线阻断项 —— 生产 Worker/Beat 启动路径错误（异步与定时任务
+起不来）；CI 的 bandit 步骤必然红灯（2 个 SHA-1 + 1 个 0.0.0.0 绑定）。
+
+**解决了什么问题**：生产异步任务链路可正常启动；CI 安全扫描步骤真正全绿。
+剩余 1 项 **B110**（`app/workflows/execution.py:189` 的 `except Exception: pass`）为低危，
+低于 CI `-ll` 门槛，不阻断；该处本就是刻意的 best-effort 外部持久化（失败不影响核心调度），
+已有代码注释说明，故不做行为改动。
+
+**回归验证**：全量门禁 **27/27 通过（159.3s，绿灯）**；`bandit -r backend/app -ll` exit 0；
+受影响的 5 个套件（`test_celery_registration` / `test_rag_hybrid_cache` /
+`test_rag_semantic_cache` / `test_rag_session_memory` / `test_rag_enterprise`）单跑全部通过；
+全仓库已无 `app.celery_app` 残留引用。
+
+## 2026-09-10 P0 交付阻断项专项：远程 CI / 门禁卡死 / 工程质量 / 生产加固
+
+**提交**：`-`（未提交；生产就绪评审 P0 清单）
+
+**改了什么**：
+
+1. 远程 CI（`.github/workflows/ci.yml`）—— 4 个必过 job：
+   - Backend Tests：锁文件安装 + `pip check` + `run_tests.ps1` 全量门禁 + pytest 覆盖率（上传 artifact）
+   - Frontend Checks：`tsc --noEmit` + `eslint` + `vitest` + `vite build`
+   - Security & Dependency Scan：`pip-audit` + `bandit` + `npm audit` + `gitleaks`
+   - Docker Build：后端 / 前端镜像构建
+
+   配合分支保护（Require status checks to pass）即可"PR 未通过禁止合并"；本地 Hook / 脚本不再是唯一防线。
+
+2. 门禁卡死根治（`backend/tests/test_workflow_checkpoint.py` + `run_tests.ps1`）：
+   - 根因：该套件模块级 `AsyncEngine`（aiosqlite 内存库）从未 `dispose()`，其连接工作线程为
+     **非守护线程（non-daemon）**，解释器 shutdown 会永久等待它 → 套件打印完 `ALL PASSED`
+     后进程挂起不退出，整个门禁被卡死。已在 `finally` 中显式 `dispose()`。
+   - 门禁每个套件加**独立超时**（默认 300s，`-TimeoutSeconds` 可调）；超时=红灯并
+     **终止整个进程树**（Windows `taskkill /T`、Linux `pkill`），stdout/stderr 落盘
+     `backend/tests/.gate_logs/` 保留现场，保证门禁能稳定、重复跑完。
+   - 门禁执行改用 .NET Process API：PS 5.1 下 `Start-Process -PassThru` 取不到 `ExitCode`
+     （得到 `$null`）会误判红灯。
+   - Python 解释器探测跨平台（venv → PATH），并把前端 ESLint 纳入本地门禁。
+
+3. 工程质量红灯：
+   - ESLint：新增 `frontend/.eslintrc.cjs`，`npm run lint` 由 exit 2 变为通过（0 error）
+   - 依赖冲突根治：`packaging` 钉 `<24`（langchain-core 要求）+ `build` 钉 `<1.5`
+     （chromadb 依赖 build，而 build>=1.5 又要求 packaging>=24）；三方约束自洽，`pip check` 全绿
+   - 锁文件：新增 `backend/requirements.lock`（可复现精确版本），CI 一律以其安装
+   - pytest：新增 `backend/pytest.ini` + `tests/pytest_suite/`（应用冒烟 + 生产配置校验），
+     CI 产出覆盖率报告
+   - 前端测试：新增 vitest + Testing Library，覆盖 API 服务、认证服务、登录页
+     （含 antd 会在两个中文字符间插空格的坑）
+
+4. 生产加固：
+   - 新增 `compose.prod.yml`：数据服务（Postgres/Redis/Chroma）不暴露端口（internal 网络）、
+     后端不挂源码且无 `--reload`、全服务非 root + `no-new-privileges`、CPU/内存/并发限制、
+     ChromaDB 固定版本、后端仅绑定回环地址
+   - `app/core/config.py`：`DEBUG` 默认 False、新增 `ENVIRONMENT`、默认 `DATABASE_URL`
+     去除固定口令、新增 `validate()`——生产环境拒绝默认 JWT 密钥 / 默认库口令 / 开启的 DEBUG
+     （启动 fail fast）
+   - `app/main.py`：启动调用 `settings.validate()`；生产关闭 `/docs`、`/redoc`、`/openapi.json`
+   - Dockerfile：后端以非 root（UID 10001）运行并改用锁文件安装；前端改用非 root nginx（8080）
+   - 开发编排改用 `Dockerfile.dev`，与生产镜像彻底分离
+
+**为什么这么改**：P0 阻断项——本地脚本与 Hook 可被绕过、门禁会卡死无法重复跑完、
+`npm run lint` 与依赖一致性红灯、生产存在默认密钥/口令、数据端口公网暴露、容器 root 运行等。
+
+**解决了什么问题**：CI 可强制门禁且不可绕过；门禁能稳定重复跑完并保留超时现场；
+前端 lint 与 `pip check` 通过、依赖可复现；生产默认安全（拒绝弱密钥、不暴露数据端口、
+非 root、限资源），启动即拒绝带病配置。
+
 ## 2026-09-04 CI 门禁：统一测试跑批 + 红灯拦截 + 提交前自检（评审阶段一收尾）
 
 **提交**：`-`（未提交；生产就绪评审驱动，对应"无 CI 门禁"问题项）

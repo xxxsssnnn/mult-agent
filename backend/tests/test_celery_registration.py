@@ -1,7 +1,7 @@
 """Celery worker/beat 任务接线回归测试（独立运行：python tests/test_celery_registration.py）
 
 覆盖：
-- worker 启动路径（loader.import_default_modules，等价 `celery -A app.celery_app worker`）
+- worker 启动路径（loader.import_default_modules，等价 `celery -A app.core.celery_app worker`）
   必须注册 memory.* 任务——此前任务只被 API 进程内的 manager.py 延迟 import，
   worker 冷启动无法处理 beat 投递的定时任务
 - beat_schedule 正确指向已注册任务，周期与配置一致
@@ -17,7 +17,7 @@ from app.core.celery_app import celery_app  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
 # 模拟 worker 启动：include + autodiscover 的默认模块导入路径，
-# 与 `celery -A app.celery_app worker` 启动时的注册行为一致。
+# 与 `celery -A app.core.celery_app worker` 启动时的注册行为一致。
 # 必须在任何断言前执行，保证后续全部检查基于 worker 视角。
 celery_app.loader.import_default_modules()
 

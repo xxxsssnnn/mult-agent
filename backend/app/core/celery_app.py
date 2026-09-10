@@ -1,6 +1,6 @@
 """Celery 应用实例
 
-docker-compose 中 worker 命令为 `celery -A app.celery_app worker`，
+docker-compose 中 worker 命令为 `celery -A app.core.celery_app worker`，
 此文件即该入口。
 
 任务注册：celery_app 构造时 include 指定任务模块，

@@ -185,7 +185,8 @@ def test_cache_disabled_noop():
     user = uuid.uuid4()
     cache.put(user, "k", {"answer": 1})
     ok("关闭状态不写入/不命中", cache.get(user, "k") is None)
-    ok("关闭状态 make_key 仍可用", len(SemanticCache.make_key(user, "q", 3, "hybrid")) == 40)
+    key_len = len(SemanticCache.make_key(user, "q", 3, "hybrid"))
+    ok("关闭状态 make_key 仍可用（sha256 定长 64）", key_len == 64)
 
 
 # --------------------------------------------------------------------------- #

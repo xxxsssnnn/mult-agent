@@ -1,6 +1,6 @@
 """记忆相关 Celery 任务
 
-worker 启动：celery -A app.celery_app worker --loglevel=info
+worker 启动：celery -A app.core.celery_app worker --loglevel=info
 Windows 本地调试需追加 --pool=solo
 """
 import asyncio
@@ -55,7 +55,7 @@ def decay_memories_task(self):
     """定时衰减记忆强度并归档低强度记忆（Celery beat 调度）
 
     compose 中由 beat 服务按 MEMORY_DECAY_INTERVAL_SECONDS 触发；
-    也可手动执行: celery -A app.celery_app call memory.decay_memories
+    也可手动执行: celery -A app.core.celery_app call memory.decay_memories
     """
     from app.memory.consolidation import make_async_session
     from app.memory.decay import decay_memories

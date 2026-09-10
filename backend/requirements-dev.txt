@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 测试与质量工具（CI / 本地质量门禁使用；不进入生产镜像）
+# 安装: python -m pip install -r backend/requirements-dev.txt
+
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+
+# 安全与依赖扫描
+pip-audit==2.7.3
+bandit==1.7.10

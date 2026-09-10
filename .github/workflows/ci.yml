@@ -1,0 +1,147 @@
+# 远程 CI 门禁（强制于 PR / main 推送）。
+#
+# 设计目标：让"绕过本地 run_tests.ps1 与 Git Hook"不再可能。
+# 需在 GitHub 仓库设置中开启分支保护，并要求以下检查通过后才可合并：
+#   - Backend Tests
+#   - Frontend Checks
+#   - Security & Dependency Scan
+#   - Docker Build
+# 设置路径：Settings -> Branches -> Branch protection rules -> Require status checks to pass。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支的新推送取消旧运行，节省额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+
+      - name: Install dependencies (lock)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.lock
+          pip install -r backend/requirements-dev.txt
+
+      - name: Dependency consistency (pip check)
+        run: pip check
+
+      - name: Regression gate (per-suite timeout + process-tree kill)
+        shell: pwsh
+        run: ./run_tests.ps1 -TimeoutSeconds 600
+
+      - name: Pytest + coverage
+        working-directory: backend
+        run: pytest --cov=app --cov-report=term --cov-report=xml
+
+      - name: Upload backend coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+          if-no-files-found: error
+
+  frontend:
+    name: Frontend Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+          if-no-files-found: ignore
+
+  security:
+    name: Security & Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python dependency vulnerabilities (pip-audit)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          pip-audit -r backend/requirements.lock
+
+      - name: Python static security scan (bandit)
+        run: |
+          pip install bandit
+          bandit -r backend/app -ll
+
+      - name: Frontend dependency audit (npm audit)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm audit --audit-level=high
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t multi-agent-backend:ci ./backend
+
+      - name: Build frontend image
+        run: docker build -t multi-agent-frontend:ci ./frontend

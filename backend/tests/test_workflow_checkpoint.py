@@ -717,25 +717,44 @@ async def test_planner_no_checkpoint_regression():
 # --------------------------------------------------------------------------- #
 
 
+async def _dispose_ledger() -> None:
+    """释放台账引擎。
+
+    坑：aiosqlite 的连接工作线程是**非守护线程**（non-daemon）。若只跑到断言结束
+    而不 dispose，解释器在 shutdown 时会永久等待该线程结束 —— 表现为本套件
+    `ALL PASSED` 打印完毕后进程仍不退出，整个测试门禁被“卡死”。
+    这里显式 dispose + 让出一次事件循环，确保线程收尾后主进程能正常退出。
+    """
+    global _ledger_engine, _ledger_factory
+    if _ledger_engine is not None:
+        await _ledger_engine.dispose()
+        _ledger_engine = None
+        _ledger_factory = None
+        await asyncio.sleep(0)
+
+
 async def main():
-    await test_settle_hook_per_terminal()
-    await test_settle_hook_failure_ignored()
-    await test_settle_only_on_terminal_retry()
-    await test_resume_reuses_completed()
-    await test_resume_keeps_failed_and_skipped()
-    await test_resume_replays_unfinished()
-    await test_resume_invalid_seed_rejected()
-    test_checkpoint_build_roundtrip()
-    test_extract_and_sanitize()
-    await test_roundtrip_checkpoint_resume_consumable()
-    await test_ledger_lifecycle()
-    await test_ledger_ownership_scope()
-    await test_ledger_save_auto_creates_row()
-    await test_ledger_list_filter()
-    await test_planner_fresh_run_persists()
-    await test_planner_resume_completed_run()
-    await test_planner_resume_half_run()
-    await test_planner_no_checkpoint_regression()
+    try:
+        await test_settle_hook_per_terminal()
+        await test_settle_hook_failure_ignored()
+        await test_settle_only_on_terminal_retry()
+        await test_resume_reuses_completed()
+        await test_resume_keeps_failed_and_skipped()
+        await test_resume_replays_unfinished()
+        await test_resume_invalid_seed_rejected()
+        test_checkpoint_build_roundtrip()
+        test_extract_and_sanitize()
+        await test_roundtrip_checkpoint_resume_consumable()
+        await test_ledger_lifecycle()
+        await test_ledger_ownership_scope()
+        await test_ledger_save_auto_creates_row()
+        await test_ledger_list_filter()
+        await test_planner_fresh_run_persists()
+        await test_planner_resume_completed_run()
+        await test_planner_resume_half_run()
+        await test_planner_no_checkpoint_regression()
+    finally:
+        await _dispose_ledger()
 
 
 if __name__ == "__main__":

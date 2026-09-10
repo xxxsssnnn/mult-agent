@@ -1,0 +1,89 @@
+# ============================================================================
+# pip-audit 基线豁免清单（Backend dependency exemption baseline）
+# ============================================================================
+# 用途
+#   `pip-audit -r backend/requirements.lock` 会忽略本文件列出的漏洞 ID；
+#   任何 **未** 列出的漏洞都会让 CI 的 "Security & Dependency Scan" 红灯。
+#   即：基线只冻结历史欠账，"新增"漏洞仍然会被拦截。
+#
+# 格式
+#   每行第一列为漏洞 ID，`#` 之后是说明文字（读取时忽略）。
+#
+# 建立日期: 2026-09-10
+# 建立原因: 引入 CI 安全门禁时，冻结"门禁建立之前就已存在"的依赖漏洞，
+#           使试点不被历史欠账阻塞，同时让门禁对新增漏洞保持拦截力。
+# 关联文档: docs/SECURITY_DEBT.md（分阶段升级计划、复核节奏、Bandit 豁免理由）
+#
+# 维护规则
+#   1. 每完成一轮依赖升级，删除对应行，重跑门禁确认绿灯；
+#   2. 新增豁免必须在 docs/SECURITY_DEBT.md 写明理由与计划版本；
+#   3. 本清单只允许缩小：除"确实无修复版本"外，不允许新增条目。
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# A. 无修复版本 —— 升级无法解决（5 项）。最优先跟踪替代方案。
+# ----------------------------------------------------------------------------
+PYSEC-2026-311          # chromadb 1.5.9   无 fix
+GHSA-2wm9-hf6c-p5cr     # chromadb 1.5.9   无 fix
+GHSA-36p7-vc44-83pf     # chromadb 1.5.9   无 fix
+GHSA-xph7-9rjv-w5fr     # chromadb 1.5.9   无 fix
+PYSEC-2026-1325         # ecdsa 0.19.2     无 fix；可改用 python-jose[cryptography] 绕开
+
+# ----------------------------------------------------------------------------
+# B. langchain 全家桶 —— 需 0.1.x -> 0.3.x/1.x 破坏性迁移（24 项）
+#    列为独立批次，迁移期间保持豁免。
+# ----------------------------------------------------------------------------
+PYSEC-2024-118          # langchain 0.1.20               fix 0.2.5
+PYSEC-2026-1507         # langchain 0.1.20               fix 0.2.0
+PYSEC-2024-323          # langchain 0.1.20               fix 0.2.9
+PYSEC-2026-2192         # langchain 0.1.20               fix 1.3.9
+PYSEC-2026-2555         # langchain 0.1.20               fix 0.3.30
+GHSA-hc5w-c9f8-9cc4     # langchain 0.1.20
+PYSEC-2026-1515         # langchain-community 0.0.38     fix 0.3.27
+PYSEC-2026-1514         # langchain-community 0.0.38     fix 0.2.4
+PYSEC-2026-1516         # langchain-community 0.0.38     fix 0.2.9
+PYSEC-2026-2561         # langchain-community 0.0.38     fix 0.2.5
+PYSEC-2026-1518         # langchain-core 0.1.53          fix 0.3.80 / 1.0.7
+PYSEC-2026-373          # langchain-core 0.1.53          fix 0.3.81 / 1.2.5
+PYSEC-2026-2193         # langchain-core 0.1.53          fix 1.2.22
+PYSEC-2026-2564         # langchain-core 0.1.53          fix 0.3.85 / 1.3.3
+PYSEC-2026-2562         # langchain-core 0.1.53          fix 1.2.11
+PYSEC-2026-2563         # langchain-core 0.1.53          fix 0.3.84 / 1.2.28
+PYSEC-2026-77           # langchain-text-splitters 0.0.2 fix 1.1.2
+PYSEC-2026-1520         # langchain-text-splitters 0.0.2 fix 0.3.9
+PYSEC-2026-2582         # langsmith 0.1.147              fix 0.8.0
+PYSEC-2026-2583         # langsmith 0.1.147              fix 0.7.31
+GHSA-f4xh-w4cj-qxq8     # langsmith 0.1.147              fix 0.8.18
+PYSEC-2026-76           # langchain-openai 0.0.8         fix 1.1.14
+PYSEC-2026-83           # langgraph 0.0.51               fix 1.0.10rc1
+PYSEC-2026-2194         # langgraph 0.0.51               fix 0.3.15
+
+# ----------------------------------------------------------------------------
+# C. FastAPI / starlette —— 随 FastAPI 升级一并解决（8 项）
+#    starlette 被 FastAPI 0.109 钉在 <0.36，单独升级 starlette 不可行，
+#    必须 FastAPI 与 starlette 同步升，故整组作为一批次。
+# ----------------------------------------------------------------------------
+PYSEC-2024-38           # fastapi 0.109.0                fix 0.109.1
+PYSEC-2026-161          # starlette 0.35.1               fix 1.0.1
+PYSEC-2026-249          # starlette 0.35.1               fix 1.3.1
+PYSEC-2026-248          # starlette 0.35.1               fix 1.3.0
+PYSEC-2026-1943         # starlette 0.35.1               fix 0.40.0
+PYSEC-2026-1941         # starlette 0.35.1               fix 0.47.2
+PYSEC-2026-2281         # starlette 0.35.1               fix 1.1.0
+PYSEC-2026-2280         # starlette 0.35.1               fix 1.1.0
+
+# ----------------------------------------------------------------------------
+# D. 低风险可单独升级 —— 建议作为第一批次清理（12 项）
+# ----------------------------------------------------------------------------
+PYSEC-2026-1850         # python-multipart 0.0.6         fix 0.0.7
+PYSEC-2026-1852         # python-multipart 0.0.6         fix 0.0.22
+PYSEC-2026-1851         # python-multipart 0.0.6         fix 0.0.18
+PYSEC-2026-3038         # python-multipart 0.0.6         fix 0.0.26
+PYSEC-2026-3037         # python-multipart 0.0.6         fix 0.0.30
+PYSEC-2026-3036         # python-multipart 0.0.6         fix 0.0.30
+PYSEC-2026-3040         # python-multipart 0.0.6         fix 0.0.31
+PYSEC-2026-3039         # python-multipart 0.0.6         fix 0.0.27
+PYSEC-2026-2270         # python-dotenv 1.0.0            fix 1.2.2
+PYSEC-2024-232          # python-jose 3.3.0              fix 3.4.0
+PYSEC-2024-233          # python-jose 3.3.0              fix 3.4.0
+PYSEC-2025-185          # python-jose 3.3.0

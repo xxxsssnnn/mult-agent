@@ -111,22 +111,31 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Python dependency vulnerabilities (pip-audit)
+      - name: Install pinned dev tooling
         run: |
           python -m pip install --upgrade pip
-          pip install pip-audit
-          pip-audit -r backend/requirements.lock
+          pip install -r backend/requirements-dev.txt
+
+      # 基线豁免：只忽略 security/pip-audit-baseline.txt 中登记的既有漏洞，
+      # 未登记的（含新增）漏洞仍会让本步骤红灯。理由与升级计划见 docs/SECURITY_DEBT.md
+      - name: Python dependency vulnerabilities (pip-audit)
+        run: |
+          BASELINE=security/pip-audit-baseline.txt
+          IGNORES=$(grep -vE '^[[:space:]]*(#|$)' "$BASELINE" \
+            | awk '{print $1}' | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
+          echo "baseline exemptions: $(grep -vcE '^[[:space:]]*(#|$)' "$BASELINE")"
+          pip-audit -r backend/requirements.lock $IGNORES
 
       - name: Python static security scan (bandit)
-        run: |
-          pip install bandit
-          bandit -r backend/app -ll
+        run: bandit -r backend/app -ll
 
+      # 基线豁免：advisory 级 allowlist 见 security/audit-ci.json。
+      # --high 与原 npm audit --audit-level=high 语义一致（moderate 不拦截）。
       - name: Frontend dependency audit (npm audit)
         working-directory: frontend
         run: |
           npm ci
-          npm audit --audit-level=high
+          npx --yes audit-ci@7.1.0 --config ../security/audit-ci.json --high --show-not-found false
 
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2

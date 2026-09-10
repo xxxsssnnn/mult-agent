@@ -5,9 +5,57 @@
 
 ---
 
+## 2026-09-10 CI 安全门禁落地：依赖漏洞基线与安全债台账
+
+**提交**：本次提交（CI 安全门禁基线豁免）
+
+**改了什么**：
+
+- **先复查：CI 安全任务首次真实运行必然红灯**。在推送前用 CI 里完全相同的命令本地复现，
+  拿到的是硬退出码：
+  - `pip-audit -r backend/requirements.lock` → **49 项 / 14 个包，exit 1**
+  - `npm audit --audit-level=high` → **17 项 / 14 条 advisory（含 2 critical），exit 1**
+
+- **策略：先豁免、后升级**。把历史欠账做成显式、可审计、可收敛的基线，而不是放宽门禁
+  （把 job 改成 `continue-on-error` 会让门禁彻底失去拦截力，那是不可接受的）：
+  - `security/pip-audit-baseline.txt`：49 个漏洞 ID 的基线清单，按"A 无修复版本 /
+    B langchain 迁移 / C FastAPI+starlette 批次 / D 低风险可升"分组标注，并写明维护规则
+  - `security/audit-ci.json`：前端 14 条 advisory 的 allowlist（GHSA 编码）
+  - `docs/SECURITY_DEBT.md`：安全债台账 —— 基线明细、实际暴露面判断、五批次升级计划、
+    Bandit 豁免留档、复核节奏与退出条件（**基线清空即回到纯门禁**）
+
+- **CI 实现**：
+  - 后端：`pip-audit --ignore-vuln`，参数由基线文件展开。**未登记的漏洞仍会红灯**
+  - 前端：改用 `audit-ci@7.1.0`（`npm audit` 不支持按 advisory 排除），
+    `--high` 与原先 `npm audit --audit-level=high` 语义一致
+  - 安全任务的工具改为从 `backend/requirements-dev.txt` 安装，与其它任务一样锁定版本
+    （原先是不固定版本的 `pip install pip-audit` / `pip install bandit`）
+
+**为什么这么改**：远程 CI 一旦真实运行，安全任务就必然红灯。关键判断是：**这道门禁无法
+只靠升级变绿** —— `chromadb 1.5.9`（4 项）与 `ecdsa 0.19.2`（1 项）上游**没有修复版本**，
+无论怎么升都会持续命中，所以豁免机制不可避免。既然必须有基线，就该把基线做成显式资产。
+
+前端同理：`npm audit fix` 实测只改动 4 个包、high/critical **一条都没解决**，
+因为修复都要破坏性大版本（`react-router` 6→7、`vite` 5→8、`@typescript-eslint` 6→7），
+不是 `audit fix` 能自动完成的。
+
+**解决了什么问题**：CI 安全任务从"必然红灯"变为"**对新增漏洞红灯、对已登记欠账放行**"，
+试点不被历史依赖债阻塞。三个实证（不依赖 GitHub CI）：
+
+- 后端：在 WSL 中**逐字复现** CI 的 bash 管道 —— 完整基线 `exit 0`（`49 ignored`）；
+  从基线删掉 1 个 ID 后 `exit 1`，且精确报出被删的那个 ID（证明门禁未被废掉）
+- 前端：`audit-ci` 用完整 allowlist → `exit 0`（`Passed npm security audit.`）；
+  删掉 1 条 GHSA → `exit 1`
+- `.github/workflows/ci.yml` 经 YAML 解析校验，四个 job 与安全任务全部步骤齐全
+
+**踩坑留档**：`audit-ci` v7 起 allowlist **只接受 GHSA 标识**，传数字 advisory ID 会直接抛
+`Unsupported number as allowlist` 而失败（最初按数字写，实证时才暴露）。
+
+---
+
 ## 2026-09-10 上线阻断项修复：生产 Celery 启动路径 + Bandit 扫描全绿
 
-**提交**：`-`（未提交；上线阻断项评审）
+**提交**：`a71235c`（fix: 修正 Celery 启动路径；非安全用途的 SHA-1 统一改为 SHA-256）
 
 **改了什么**：
 

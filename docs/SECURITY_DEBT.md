@@ -10,7 +10,7 @@
 
 | 扫描 | 命令 | 建立门禁时的结果 |
 | --- | --- | --- |
-| 后端 | `pip-audit -r backend/requirements.lock` | 49 项 / 14 个包 |
+| 后端 | `pip-audit -r backend/requirements.lock` | 49 项 / 14 个包（**2026-09-10 已降至 37 项 / 12 个包**） |
 | 前端 | `npm audit --audit-level=high` | 17 项 / 14 条 advisory（含 2 critical） |
 
 这些漏洞**不是本次改动引入的**，属于历史欠账。但它们已经真实地卡住了 CI。
@@ -70,17 +70,17 @@ high 及以上未豁免即红灯，moderate 不拦截。
 不再接受数字形式的 advisory ID（传数字会直接抛 `Unsupported number as allowlist`）。
 因此配置文件与下表统一使用 GHSA 编码。
 
-## 4. 后端基线明细（49 项）
+## 4. 后端基线明细（当前 37 项，建立时 49 项）
 
 完整 ID 清单见 `security/pip-audit-baseline.txt`，这里按处理批次归类。
 
 | 组 | 包 | 项数 | 处理方式 |
 | --- | --- | --- | --- |
 | A | `chromadb 1.5.9` | 4 | **无修复版本**，只能跟踪上游 |
-| A | `ecdsa 0.19.2` | 1 | **无修复版本**；可改用 `python-jose[cryptography]` 绕开 |
+| A | `ecdsa 0.19.2` | 1 | **无修复版本**。注意：**换 python-jose 后端绕不开它** —— 实测 `python-jose[cryptography] 3.5.0` 仍硬依赖 `ecdsa!=0.15`，而锁文件里本来就已有 `cryptography` |
 | B | `langchain` 全家桶 | 24 | 需 0.1.x → 0.3.x/1.x 破坏性迁移，独立批次 |
 | C | `fastapi 0.109.0` + `starlette 0.35.1` | 8 | FastAPI 钉死 starlette <0.36，必须同步升级 |
-| D | `python-multipart` / `python-dotenv` / `python-jose` | 12 | 低风险，可单独升级，建议第一批清理 |
+| ~~D~~ | `python-multipart` / `python-dotenv` / `python-jose` | ~~12~~ **0** | **已于 2026-09-10 清理完毕** |
 
 组 B 明细：`langchain`(6)、`langchain-community`(4)、`langchain-core`(6)、
 `langchain-text-splitters`(2)、`langsmith`(3)、`langchain-openai`(1)、`langgraph`(2)。
@@ -114,7 +114,7 @@ high 及以上未豁免即红灯，moderate 不拦截。
 
 | 批次 | 范围 | 预计解除 | 风险 | 前置条件 |
 | --- | --- | --- | --- | --- |
-| 第一 | `python-multipart`、`python-dotenv`、`python-jose` | 12 项 | 低 | 跑 27 套件门禁 |
+| 第一 | `python-multipart`、`python-dotenv`、`python-jose` | 12 项 → **已清零** | 低 | **已完成**：27 套件门禁通过（165.2s） |
 | 第二 | FastAPI + starlette 同步升级 | 8 项 | 中 | 需回归中间件/路由/依赖注入相关行为 |
 | 第三 | 前端 `@typescript-eslint` 6→7、`js-yaml`、`path-to-regexp` | 5 条 | 中 | lint 与 build 回归 |
 | 第四 | `react-router-dom` 6→7、`vite` 5→8、`vitest` | 5 条 | 高 | 路由与构建链路改动，需完整前端回归 |

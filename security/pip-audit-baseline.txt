@@ -73,17 +73,10 @@ PYSEC-2026-2281         # starlette 0.35.1               fix 1.1.0
 PYSEC-2026-2280         # starlette 0.35.1               fix 1.1.0
 
 # ----------------------------------------------------------------------------
-# D. 低风险可单独升级 —— 建议作为第一批次清理（12 项）
+# D. 【2026-09-10 已清理完毕，条目已删除】
+#    python-multipart 0.0.6  -> 0.0.32
+#    python-dotenv    1.0.0  -> 1.2.3
+#    python-jose      3.3.0  -> 3.5.0
+#    原 12 项全部消除（49 项 -> 37 项），故不再需要豁免。
+#    历史条目见 git 历史；复核记录见 docs/SECURITY_DEBT.md 第 6 节。
 # ----------------------------------------------------------------------------
-PYSEC-2026-1850         # python-multipart 0.0.6         fix 0.0.7
-PYSEC-2026-1852         # python-multipart 0.0.6         fix 0.0.22
-PYSEC-2026-1851         # python-multipart 0.0.6         fix 0.0.18
-PYSEC-2026-3038         # python-multipart 0.0.6         fix 0.0.26
-PYSEC-2026-3037         # python-multipart 0.0.6         fix 0.0.30
-PYSEC-2026-3036         # python-multipart 0.0.6         fix 0.0.30
-PYSEC-2026-3040         # python-multipart 0.0.6         fix 0.0.31
-PYSEC-2026-3039         # python-multipart 0.0.6         fix 0.0.27
-PYSEC-2026-2270         # python-dotenv 1.0.0            fix 1.2.2
-PYSEC-2024-232          # python-jose 3.3.0              fix 3.4.0
-PYSEC-2024-233          # python-jose 3.3.0              fix 3.4.0
-PYSEC-2025-185          # python-jose 3.3.0

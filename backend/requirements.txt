@@ -25,10 +25,10 @@ packaging>=23.2,<24.0
 build>=1.0,<1.5
 
 # Authentication
-python-jose[cryptography]==3.3.0
+python-jose[cryptography]==3.5.0  # 3.3.0 有算法混淆等 3 条 CVE；注意其仍硬依赖 ecdsa，升级 jose 不会带掉 ecdsa
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1  # passlib 1.7.4 与 bcrypt>=4.1 不兼容（72 字节自检崩溃），必须 <4.1
-python-multipart==0.0.6
+python-multipart==0.0.32  # 0.0.6 有 8 条 CVE（DoS / 请求走私）
 
 # LangChain (AI/LLM) —— 钉死已验证版本，避免在 langchain-core<0.2 区间内漂移
 langchain==0.1.20
@@ -47,7 +47,7 @@ redis==5.0.1
 celery==5.3.6
 
 # Utilities
-python-dotenv==1.0.0
+python-dotenv==1.2.3  # 1.0.0 有 1 条 CVE
 structlog==23.2.0
 httpx==0.28.1
 email-validator==2.1.0

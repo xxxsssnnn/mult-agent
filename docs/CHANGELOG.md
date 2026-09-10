@@ -5,6 +5,48 @@
 
 ---
 
+## 2026-09-10 依赖基线开始收缩：低风险组 12 项清零（49 → 37）
+
+**提交**：本次提交（低风险依赖升级）
+
+**改了什么**：按台账第 6 节的批次计划完成**第一批次（低风险组）**的依赖升级，
+并同步收缩基线：
+
+| 包 | 升级前 | 升级后 | 消除漏洞 |
+| --- | --- | --- | --- |
+| `python-multipart` | 0.0.6 | **0.0.32** | 8 项 |
+| `python-jose[cryptography]` | 3.3.0 | **3.5.0** | 3 项 |
+| `python-dotenv` | 1.0.0 | **1.2.3** | 1 项 |
+
+后端基线从 **49 项 / 14 个包** 降到 **37 项 / 12 个包**；
+`security/pip-audit-baseline.txt` 的 D 组 12 条豁免已按"只允许缩小"的规则删除，
+台账（`docs/SECURITY_DEBT.md`）的分组表与批次计划同步更新。
+
+**为什么这么改**：这是"先豁免、后升级"策略的第二阶段。基线只是让 CI 先恢复工作，
+企业交付前必须持续缩小，尤其是**运行时**依赖 —— 这三条都直接服务于请求解析与令牌签名，
+不能长期豁免。
+
+**怎么保证没引入回归**：
+
+- **改锁文件前先证明等价性**：把 venv 的 `pip freeze` 与 `requirements.lock` 做
+  包名/版本双向比对，结论是"版本不同**恰好 3 个**、仅在 lock **为空**、
+  仅在 freeze 的 24 个全是 dev 工具（pytest / bandit / pip-audit / coverage …，
+  本就不该进锁文件）"。因此改这 3 行与"重新生成锁文件"完全等价，没有引入漂移。
+- `pip check`：无破损依赖（`packaging` / `build` 的既有约束未被触碰）。
+- 完整门禁 **27/27 通过（165.2s）**，其中 `test_auth_closure.py` 的 23 项鉴权断言
+  覆盖了 jwt 升级的兼容性。
+- 基线收缩后按 CI 的方式展开豁免参数跑 `pip-audit` → `No known vulnerabilities found,
+  37 ignored`，退出码 0；并校验基线文件提取出的 37 个 token 全部形如
+  `PYSEC-*` / `GHSA-*`（无格式污染）。
+
+**踩坑留档**：台账里原先写的"`ecdsa` 可通过改用 `python-jose[cryptography]` 绕开"
+是**错的**，已修正。实测 `python-jose[cryptography] 3.5.0` 仍硬依赖 `ecdsa!=0.15`
+（dry-run 明确显示 `Requirement already satisfied: ecdsa!=0.15`），而锁文件里本来就
+同时装着 `cryptography`。所以 `ecdsa 0.19.2` 那 1 项**不能靠换 jose 后端解决**，
+只能跟踪上游 —— 如果当初按这个错误判断去"解决"，会在最后验收时才发现漏洞仍在。
+
+---
+
 ## 2026-09-10 CI 第二轮：gitleaks 误报修复
 
 **提交**：本次提交（gitleaks 误报修复）

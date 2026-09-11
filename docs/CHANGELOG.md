@@ -5,6 +5,65 @@
 
 ---
 
+## 2026-09-11 前端安全债批次 3：@typescript-eslint 升级 + 传递依赖 overrides，前端基线 14 → 8 条
+
+**提交**：本次提交（安全债批次 3）
+
+**改了什么**：
+
+- `frontend/package.json`：
+  - `@typescript-eslint/eslint-plugin`、`@typescript-eslint/parser` 6.21.0 → **7.18.0**
+  - 新增 `overrides`：把 `@ant-design/pro-layout` 下的 `path-to-regexp` 强制到 `^8.4.2`
+- `frontend/package-lock.json`：`minimatch` 9.0.3→9.0.9、`js-yaml` 4.3.1→4.3.2、
+  `path-to-regexp` 8.2.0→8.4.2，`@typescript-eslint/*` 全家 6.21.0→7.18.0
+- `security/audit-ci.json`：allowlist 14 条 → **8 条**（删掉已解除的 6 条）
+- `docs/SECURITY_DEBT.md`：批次 3 标完成，新增第 5.1 节记录"上游精确钉死"这类坑
+
+**为什么这么改**：按台账批次 3 推进，目标是清掉 6 条 advisory。
+
+**三个包都不是直接依赖，难点各不相同**：
+
+1. `minimatch`（3 条）：由 `@typescript-eslint/typescript-estree` 引入。
+   6.21.0 把它**精确**钉成 `9.0.3`（不是 `^9.0.3`），所以只能升 `@typescript-eslint`。
+   升到 7.18.0 后它声明 `minimatch: ^9.0.4`，解析到 9.0.9，三条 ReDoS 一并解除。
+2. `js-yaml`（1 条）：由 `eslint` 以 `^4.1.0` 引入。**本地 `node_modules` 里其实已是
+   4.3.2（修复版），但锁文件里还是 4.3.1** —— 两者漂移。`npm audit` 以锁文件为准，
+   所以一直报这条；而 CI 用 `npm ci` 严格按锁安装，拿到的正是 4.3.1。
+   仅凭"本地装的是新的"不能判定已修复，必须以锁文件 / `npm audit` 为准。
+3. `path-to-regexp`（2 条）：由 `@ant-design/pro-layout` 引入，上游同样**精确**钉成
+   `8.2.0`。**查过 registry：`@ant-design/pro-layout` 的 `latest` 仍是 7.22.7，
+   钉的还是 8.2.0 —— 上游根本没发修复版**，升级父包无效。
+   对精确钉死的传递依赖，`overrides` 是唯一可行的解除方式。
+   作用域刻意收窄到 `@ant-design/pro-layout` 这一个父包，不影响其他潜在消费方。
+
+**关键取舍：没有升到 @typescript-eslint 8.x**
+
+`latest` 已是 8.70.0，但升它会把 `eslint-visitor-keys` 拉到 5.x，
+而 5.x 的 `engines` 要求 node `^20.19.0 || ^22.13.0 || >=24`，
+**与本项目 CI 的 node 18 不兼容**。7.18.0 是最后一个 7.x，
+`engines` 为 `^18.18.0 || >=20.0.0`，与 CI 一致，且同样能解除 minimatch。
+留在 7.x 是有意为之：本批次的目标是清掉这 6 条具体 advisory，
+而不是顺带改掉 Node 版本矩阵；升 8.x 应作为独立批次、连带动 CI 的 Node 版本。
+
+**怎么验证的**：
+
+- `tsc --noEmit` → exit 0
+- `npm run lint`（`--max-warnings 0`）→ exit 0（7.x 的 recommended 规则集未产生新告警）
+- `npm run test` → **3 个文件 / 8 个用例全过**（13.02s）
+- `npm run build`（`tsc && vite build`）→ 成功（13.52s，仅原有的 chunk 体积提示）
+- `npm audit` → **17 项 → 7 项**，剩下 7 项恰好是批次 4 的范围
+- 按 CI 方式跑 `audit-ci --high`（用收缩后的 8 条白名单）→ **Passed，exit 0**；
+  输出里被豁免的只剩 `GHSA-5xrq-8626-4rwp`、`GHSA-fx2h-pf6j-xcff` 两条
+- **反向对照**：把仍然存在的 `vite` high 从白名单里拿掉再跑 `audit-ci` →
+  `Failed security audit due to high vulnerabilities`，exit 1。
+  这一步证明门禁没有被"白名单化"架空，仍能拦截未登记的高危。
+
+**仍未验证**：完整门禁只在 node 20.11 上跑过，没有在 CI 实际的 node 18 上本地复现；
+依据是 7.18.0 的 `engines` 明确覆盖 node 18.18+，且未引入要求更高 Node 的传递依赖
+（这正是没有选 8.x 的原因）。
+
+---
+
 ## 2026-09-11 后端安全债批次 2：FastAPI/starlette 升级，基线 37 → 29 项
 
 **提交**：本次提交（安全债批次 2）

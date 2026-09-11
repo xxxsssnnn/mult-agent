@@ -11,7 +11,7 @@
 | 扫描 | 命令 | 建立门禁时的结果 |
 | --- | --- | --- |
 | 后端 | `pip-audit -r backend/requirements.lock` | 49 项 / 14 个包（**2026-09-10 降至 37 项**，**2026-09-11 降至 29 项 / 9 个包**） |
-| 前端 | `npm audit --audit-level=high` | 17 项 / 14 条 advisory（含 2 critical） |
+| 前端 | `npm audit --audit-level=high` | 17 项 / 14 条 advisory（含 2 critical）（**2026-09-11 降至 7 项 / 8 条 advisory**） |
 
 这些漏洞**不是本次改动引入的**，属于历史欠账。但它们已经真实地卡住了 CI。
 
@@ -70,6 +70,10 @@ high 及以上未豁免即红灯，moderate 不拦截。
 不再接受数字形式的 advisory ID（传数字会直接抛 `Unsupported number as allowlist`）。
 因此配置文件与下表统一使用 GHSA 编码。
 
+当某条 advisory 的宿主包**无法通过升级解除**（上游把传递依赖精确钉死且自身未发新版）时，
+用 `package.json` 的 `overrides` 强制提升那个传递依赖，并尽量把作用域收窄到出问题的父包。
+见第 5.1 节。
+
 ## 4. 后端基线明细（当前 29 项，建立时 49 项）
 
 完整 ID 清单见 `security/pip-audit-baseline.txt`，这里按处理批次归类。
@@ -85,18 +89,18 @@ high 及以上未豁免即红灯，moderate 不拦截。
 组 B 明细：`langchain`(6)、`langchain-community`(4)、`langchain-core`(6)、
 `langchain-text-splitters`(2)、`langsmith`(3)、`langchain-openai`(1)、`langgraph`(2)。
 
-## 5. 前端基线明细（14 条 advisory）
+## 5. 前端基线明细（当前 8 条，建立时 14 条）
 
 | GitHub advisory | 包 | 严重度 | 说明 | 解除方式 |
 | --- | --- | --- | --- | --- |
 | `GHSA-5xrq-8626-4rwp` | `vitest` | critical | Vitest UI server 任意文件读取/执行 | 随 vite/vitest 升级 |
 | `GHSA-fx2h-pf6j-xcff` | `vite` | high | `server.fs.deny` 在 Windows 下可绕过 | 随 vite 升级 |
-| `GHSA-j3q9-mxjg-w52f` | `path-to-regexp` | high | ReDoS（顺序可选组） | 经 `@ant-design/pro-layout` 传入，需换依赖版本 |
-| `GHSA-27v5-c462-wpq7` | `path-to-regexp` | moderate | ReDoS（多通配符） | 同上 |
-| `GHSA-2883-xcg3-v3hh` | `js-yaml` | high | `maxTotalMergeKeys` 未限制 CPU | 传递依赖，随上游升级 |
-| `GHSA-3ppc-4f35-3m26` | `minimatch` | high | ReDoS（重复通配符） | 随 `@typescript-eslint` 6→7 |
-| `GHSA-7r86-cg39-jmmj` | `minimatch` | high | ReDoS（GLOBSTAR 回溯） | 同上 |
-| `GHSA-23c5-xmqv-rm74` | `minimatch` | high | ReDoS（嵌套 extglob） | 同上 |
+| ~~`GHSA-j3q9-mxjg-w52f`~~ | `path-to-regexp` | ~~high~~ **0** | ReDoS（顺序可选组） | **已于 2026-09-11 解除**：`overrides` 强制 8.2.0 → 8.4.2 |
+| ~~`GHSA-27v5-c462-wpq7`~~ | `path-to-regexp` | ~~moderate~~ **0** | ReDoS（多通配符） | 同上 |
+| ~~`GHSA-2883-xcg3-v3hh`~~ | `js-yaml` | ~~high~~ **0** | `maxTotalMergeKeys` 未限制 CPU | **已于 2026-09-11 解除**：4.3.1 → 4.3.2 |
+| ~~`GHSA-3ppc-4f35-3m26`~~ | `minimatch` | ~~high~~ **0** | ReDoS（重复通配符） | **已于 2026-09-11 解除**：`@typescript-eslint` 6→7 后 minimatch 9.0.3 → 9.0.9 |
+| ~~`GHSA-7r86-cg39-jmmj`~~ | `minimatch` | ~~high~~ **0** | ReDoS（GLOBSTAR 回溯） | 同上 |
+| ~~`GHSA-23c5-xmqv-rm74`~~ | `minimatch` | ~~high~~ **0** | ReDoS（嵌套 extglob） | 同上 |
 | `GHSA-wrjc-x8rr-h8h6` | `react-router` | moderate | Open redirect | 需 `react-router-dom` 6→7 |
 | `GHSA-337j-9hxr-rhxg` | `react-router` | moderate | SSR 水合期构造器注入 | 同上 |
 | `GHSA-jjmj-jmhj-qwj2` | `react-router-dom` | moderate | Open redirect 导致 XSS | 同上 |
@@ -107,8 +111,29 @@ high 及以上未豁免即红灯，moderate 不拦截。
 **关于实际暴露面**：`vite` / `vitest` / `esbuild` 这几条的触发前提是"开发服务器
 对外可达"。生产镜像里前端只跑 Nginx 托管的静态产物，不含 dev server，
 因此这几条在**当前部署形态下不构成生产暴露**——这也是它们被放进第一批豁免
-而不是立即处理的原因。`react-router` 与 `path-to-regexp` 属于运行时依赖，
-需要在升级批次里真实修掉，不能长期豁免。
+而不是立即处理的原因。`react-router` 属运行时依赖，需要在升级批次里真实修掉。
+`path-to-regexp` 同样属运行时依赖（`@ant-design/pro-layout` 的路由匹配），
+已于 2026-09-11 用 `overrides` 真实修掉，见下节。
+
+### 5.1 一个必须记住的坑：上游「精确钉死」导致传递依赖无法靠升级解除
+
+三个包都不是直接依赖，且**上游把版本写成了精确值而非 `^` 范围**：
+
+| 被钉死的包 | 上游 | 声明方式 | 后果 |
+| --- | --- | --- | --- |
+| `minimatch 9.0.3` | `@typescript-eslint/typescript-estree` 6.21.0 | `9.0.3`（精确） | 只能升级 `@typescript-eslint` 本身 |
+| `path-to-regexp 8.2.0` | `@ant-design/pro-layout` 7.22.7 | `8.2.0`（精确） | **上游 latest 就是 7.22.7，升级无效**，只能 `overrides` |
+
+`@ant-design/pro-layout` 的 `latest` 标签仍然是 7.22.7、仍钉 `path-to-regexp 8.2.0`，
+即上游尚未发布修复版。因此对 `path-to-regexp` 而言，`overrides` 是**唯一**可行的
+解除方式（`npm audit fix` 的非破坏性路径改不动一个精确钉死的版本）。
+`overrides` 放在 `frontend/package.json`，作用域刻意收窄到
+`@ant-design/pro-layout` 这一个父包，避免影响其他可能消费 `path-to-regexp` 的依赖。
+
+> 另一个反直觉点：`js-yaml` 在**本地 `node_modules` 里已经是 4.3.2**，
+> 但**锁文件里还是 4.3.1** —— 两者漂移。`npm audit` 以锁文件为准，
+> 所以它一直报这条；而 CI 用 `npm ci` 严格按锁安装，拿到的正是 4.3.1。
+> 仅凭"本地看起来是新的"不能判定已修复，必须以 `npm audit` / 锁文件为准。
 
 ## 6. 分阶段升级计划
 
@@ -116,7 +141,7 @@ high 及以上未豁免即红灯，moderate 不拦截。
 | --- | --- | --- | --- | --- |
 | 第一 | `python-multipart`、`python-dotenv`、`python-jose` | 12 项 → **已清零** | 低 | **已完成**：27 套件门禁通过（165.2s） |
 | 第二 | FastAPI + starlette 同步升级 | 8 项 → **已清零** | 中 | **已完成**：0.109.0/0.35.1 → 0.141.1/1.6.0，并发上调 pydantic 2.5.3→2.13.5；27 套件门禁通过（152.9s） |
-| 第三 | 前端 `@typescript-eslint` 6→7、`js-yaml`、`path-to-regexp` | 5 条 | 中 | lint 与 build 回归 |
+| 第三 | 前端 `@typescript-eslint` 6→7、`js-yaml`、`path-to-regexp` | 6 条 → **已清零**（计划原写 5 条，实际 6 条） | 中 | **已完成**：`@typescript-eslint` 6.21.0→7.18.0、minimatch 9.0.3→9.0.9、js-yaml 4.3.1→4.3.2、path-to-regexp 8.2.0→8.4.2（`overrides`）；前端门禁 tsc / eslint / vitest（8 用例）/ vite build 全绿 |
 | 第四 | `react-router-dom` 6→7、`vite` 5→8、`vitest` | 5 条 | 高 | 路由与构建链路改动，需完整前端回归 |
 | 第五 | langchain 0.1 → 0.3/1.x 全家桶 | 24 项 | 高 | RAG 链路改造，需专项验证 |
 | 待上游 | `chromadb` 4 项、`ecdsa` 1 项 | 5 项 | — | `ecdsa` 可先切 `cryptography` 后端解除 |

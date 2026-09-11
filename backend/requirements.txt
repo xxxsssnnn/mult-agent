@@ -4,8 +4,10 @@
 # 仅本文件不足以复现环境，请勿单独用它做生产/CI 安装。
 
 # Core Web Framework
-fastapi==0.109.0
+fastapi==0.141.1  # 0.109.0 连带 starlette 0.35.1 共 8 条 CVE（见 docs/SECURITY_DEBT.md 批次 2）
 uvicorn[standard]==0.27.0
+# starlette 是 fastapi 的传递依赖，由锁文件钉住：0.35.1 -> 1.6.0
+# （starlette 1.x 是主版本跃迁，升级后已跑通全部回归门禁）
 
 # Database
 sqlalchemy[asyncio]==2.0.25
@@ -14,7 +16,7 @@ alembic==1.13.1
 aiosqlite==0.22.1
 
 # Validation & Settings
-pydantic==2.5.3
+pydantic==2.13.5  # 随 fastapi 0.141.1 上调（该版本要求 pydantic>=2.9），非安全驱动
 pydantic-settings==2.1.0
 
 # 依赖一致性关键约束（勿随意放开，否则 pip check 变红）

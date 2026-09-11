@@ -5,6 +5,59 @@
 
 ---
 
+## 2026-09-11 后端安全债批次 2：FastAPI/starlette 升级，基线 37 → 29 项
+
+**提交**：本次提交（安全债批次 2）
+
+**改了什么**：
+
+- `backend/requirements.txt`：`fastapi` 0.109.0 → **0.141.1**；`pydantic` 2.5.3 → 2.13.5
+  （被动上调：0.141.1 要求 `pydantic>=2.9`）；补注释说明 starlette 由锁文件钉住。
+- `backend/requirements.lock`：`fastapi` 0.141.1、`starlette` 1.6.0、`pydantic` 2.13.5、
+  `pydantic_core` 2.46.5，新增 `typing-inspection==0.4.4`（pydantic 2.13 的新依赖）。
+- `security/pip-audit-baseline.txt`：删除 C 组 8 个条目（**37 项 → 29 项**）。
+- `docs/SECURITY_DEBT.md`：批次 2 标记完成，更新计数。
+
+**为什么这么改**：按台账批次 2 推进。这 8 项里 `starlette` 最高要求 fix 1.3.1，
+而 FastAPI 0.109 把 starlette 钉在 `<0.36` —— 单独升 starlette 不可行，
+必须整体跨到 starlette 1.x。这是台账里把它列为一组的原因。
+
+**关键取舍：没有用 `pip freeze` 重生成锁文件**
+
+`requirements.lock` 的头注释写明它来自「venv 的 `pip freeze`」。
+但当前 venv 里额外装了 `pytest` / `bandit` / `pip-audit` 及其一串传递依赖
+（`cyclonedx-python-lib`、`license-expression`、`html5lib`、`CacheControl` …）。
+直接按注释重生成，会把这 20 多个**测试期工具**写进运行时锁文件，污染生产依赖面。
+因此改为**只手工改必要的 5 行**，最终 `git diff` 恰好 5 处（4 处改版本 + 1 处新增）。
+
+> 附带发现：PowerShell 的 `Sort-Object` 是文化相关排序（会忽略 `-` 等标点），
+> 与 `pip freeze` 的排序不一致，重生成还会带来大量顺序扰动。手工改反而更干净。
+
+**怎么验证的**：
+
+- 变更集先经 `pip install --dry-run` 确认只影响 5 个包，范围可控后才动手。
+- 全量回归门禁 **27/27 通过（152.9s）**。
+- `pip check` → `No broken requirements found.`
+  （`packaging<24` / `build<1.5` / `chromadb` 那组脆弱三方约束未被打破）。
+- `bandit -r backend/app -ll` → 0 medium/high，与台账记录一致。
+- `pip-audit` 带**去掉这 8 项后的基线**运行 → `No known vulnerabilities found, 29 ignored`，
+  退出码 0。这一步是必要的：只有「不给这些 ID 豁免」时仍通过，
+  才证明它们真被修掉，而不是被基线掩盖。
+- 不带任何豁免的全量扫描 → `29 known vulnerabilities in 9 packages`，
+  分组与基线完全吻合（chromadb 4 + ecdsa 1 + langchain 全家桶 24）。
+- 顺带确认 `requirements-dev.txt` 只有 pytest/pip-audit/bandit，无框架版本约束，不会冲突。
+
+**顺带发现的一个运维风险**：本次扫描发现 chromadb 的 advisory ID 已从
+`GHSA-2wm9-hf6c-p5cr` 等变为 `PYSEC-2026-3813/3814/3815`（同一批漏洞换了标识）。
+实测现有 GHSA 豁免仍能通过别名覆盖它们、CI 不会因此红灯，
+但这说明**基线存在"ID 漂移导致失配"的风险**：一旦上游改用不互为别名的 ID，
+基线就会静默失效并让 CI 红灯。已记入台账的第 9 节复核事项。
+
+**仍未验证**：运行期行为只覆盖到回归门禁的深度。未在真实
+PostgreSQL/Redis/Chroma 环境下跑集成测试（本机无 Docker），也未做性能压测。
+
+---
+
 ## 2026-09-11 告警改投企业微信群机器人 + Alertmanager 升级至 0.34.0
 
 **提交**：本次提交（企业微信渠道）

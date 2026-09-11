@@ -10,7 +10,7 @@
 
 | 扫描 | 命令 | 建立门禁时的结果 |
 | --- | --- | --- |
-| 后端 | `pip-audit -r backend/requirements.lock` | 49 项 / 14 个包（**2026-09-10 已降至 37 项 / 12 个包**） |
+| 后端 | `pip-audit -r backend/requirements.lock` | 49 项 / 14 个包（**2026-09-10 降至 37 项**，**2026-09-11 降至 29 项 / 9 个包**） |
 | 前端 | `npm audit --audit-level=high` | 17 项 / 14 条 advisory（含 2 critical） |
 
 这些漏洞**不是本次改动引入的**，属于历史欠账。但它们已经真实地卡住了 CI。
@@ -70,7 +70,7 @@ high 及以上未豁免即红灯，moderate 不拦截。
 不再接受数字形式的 advisory ID（传数字会直接抛 `Unsupported number as allowlist`）。
 因此配置文件与下表统一使用 GHSA 编码。
 
-## 4. 后端基线明细（当前 37 项，建立时 49 项）
+## 4. 后端基线明细（当前 29 项，建立时 49 项）
 
 完整 ID 清单见 `security/pip-audit-baseline.txt`，这里按处理批次归类。
 
@@ -79,7 +79,7 @@ high 及以上未豁免即红灯，moderate 不拦截。
 | A | `chromadb 1.5.9` | 4 | **无修复版本**，只能跟踪上游 |
 | A | `ecdsa 0.19.2` | 1 | **无修复版本**。注意：**换 python-jose 后端绕不开它** —— 实测 `python-jose[cryptography] 3.5.0` 仍硬依赖 `ecdsa!=0.15`，而锁文件里本来就已有 `cryptography` |
 | B | `langchain` 全家桶 | 24 | 需 0.1.x → 0.3.x/1.x 破坏性迁移，独立批次 |
-| C | `fastapi 0.109.0` + `starlette 0.35.1` | 8 | FastAPI 钉死 starlette <0.36，必须同步升级 |
+| ~~C~~ | `fastapi` / `starlette`（+ 被动上调的 `pydantic`） | ~~8~~ **0** | **已于 2026-09-11 清理完毕**：`fastapi` 0.109.0→0.141.1、`starlette` 0.35.1→1.6.0、`pydantic` 2.5.3→2.13.5 |
 | ~~D~~ | `python-multipart` / `python-dotenv` / `python-jose` | ~~12~~ **0** | **已于 2026-09-10 清理完毕** |
 
 组 B 明细：`langchain`(6)、`langchain-community`(4)、`langchain-core`(6)、
@@ -115,7 +115,7 @@ high 及以上未豁免即红灯，moderate 不拦截。
 | 批次 | 范围 | 预计解除 | 风险 | 前置条件 |
 | --- | --- | --- | --- | --- |
 | 第一 | `python-multipart`、`python-dotenv`、`python-jose` | 12 项 → **已清零** | 低 | **已完成**：27 套件门禁通过（165.2s） |
-| 第二 | FastAPI + starlette 同步升级 | 8 项 | 中 | 需回归中间件/路由/依赖注入相关行为 |
+| 第二 | FastAPI + starlette 同步升级 | 8 项 → **已清零** | 中 | **已完成**：0.109.0/0.35.1 → 0.141.1/1.6.0，并发上调 pydantic 2.5.3→2.13.5；27 套件门禁通过（152.9s） |
 | 第三 | 前端 `@typescript-eslint` 6→7、`js-yaml`、`path-to-regexp` | 5 条 | 中 | lint 与 build 回归 |
 | 第四 | `react-router-dom` 6→7、`vite` 5→8、`vitest` | 5 条 | 高 | 路由与构建链路改动，需完整前端回归 |
 | 第五 | langchain 0.1 → 0.3/1.x 全家桶 | 24 项 | 高 | RAG 链路改造，需专项验证 |
@@ -188,6 +188,12 @@ CI 第二个 run（`de501eb`）的失败点不是依赖扫描，而是 gitleaks 
 ## 9. 复核节奏与退出条件
 
 - **节奏**：每季度复核一次；任何依赖升级完成后立即复核并删除已解除条目。
+- **核对 advisory ID 是否漂移**：同一个漏洞的上游标识会变。2026-09-11 复核时发现
+  `chromadb` 的 3 条豁免已从 `GHSA-*` 变为 `PYSEC-2026-3813/3814/3815`；
+  实测旧 GHSA 标识仍能通过**别名**覆盖新标识，CI 未受影响。但这意味着一旦上游改用
+  不互为别名的标识，基线会**静默失配**并让 CI 红灯。因此每次复核都应用
+  **不带任何豁免**的全量扫描比对一次（`pip-audit -r backend/requirements.lock`），
+  确认报告出的 ID 与基线一一对应，多出来的即为漂移。
 - **新增豁免门槛**：默认禁止。只有"上游确实没有修复版本"才允许新增，
   且必须在本文档登记理由与跟踪方式。
 - **退出条件**：本台账清空（`security/pip-audit-baseline.txt` 与

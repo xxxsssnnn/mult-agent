@@ -12,7 +12,10 @@
 退出码：0 = 演练通过，1 = 演练失败。
 
 真实配置文件的唯一改动：把 `url_file` 指向本机临时 secrets 目录。
-其余部分（路由、分组、抑制规则、重复间隔）全部按仓库里的原样生效。
+其余部分（路由、分组、抑制规则、重复间隔、payload 模板）全部按仓库里的原样生效。
+
+断言的是**企业微信群机器人**的负载契约，而不只是"有东西发出来"：
+`amtool check-config` 不渲染模板，payload 写错只有真发一次才会暴露。
 """
 
 from __future__ import annotations
@@ -37,6 +40,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO_ROOT / "monitoring" / "alertmanager.yml"
 DEFAULT_WORK = REPO_ROOT / "monitoring" / "drill" / "_work"
 ALERT_NAME = "DrillTestAlert"
+
+# 通知正文含 emoji，Windows 控制台默认是 GBK，直接 print 会抛 UnicodeEncodeError。
+# 保留控制台编码、只把不可编码字符降级为 "?"，避免演练因展示问题而假失败。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +128,27 @@ def received_count() -> int:
         return len(_Sink.received)
 
 
+def wechat_content(payload):
+    """提取企业微信群机器人 markdown 正文；不符合约定则返回 None。
+
+    自定义 payload 之后**不再有** `version` / `status` / `alerts` 等默认字段，
+    群机器人只认 `{"msgtype":"markdown","markdown":{"content":"..."}}`。
+    模板渲染出非法 JSON 时，Alertmanager 会把该值退化成字符串，
+    群机器人随后报参数错误 —— 所以这里必须严格校验类型。
+    """
+    if not isinstance(payload, dict) or payload.get("msgtype") != "markdown":
+        return None
+    block = payload.get("markdown")
+    if not isinstance(block, dict):
+        return None
+    content = block.get("content")
+    return content if isinstance(content, str) and content else None
+
+
+def one_line(text: str) -> str:
+    return text.replace("\r", "").replace("\n", " | ")
+
+
 def wait_for_sink(start_index: int, timeout: float):
     """等待下标为 start_index 的投递（即第 start_index+1 条），返回 (payload, 耗时秒)。"""
     begin = time.monotonic()
@@ -147,7 +179,7 @@ def run_local(args) -> int:
     if work.exists():
         shutil.rmtree(work)
     (work / "secrets").mkdir(parents=True)
-    secrets_file = work / "secrets" / "webhook_url"
+    secrets_file = work / "secrets" / "wechat_robot_url"
 
     # 本地接收器
     sink_port = free_port()
@@ -209,14 +241,21 @@ def run_local(args) -> int:
             )
             return 1
 
-        alerts = payload.get("alerts") or []
-        names = [a.get("labels", {}).get("alertname") for a in alerts]
-        if ALERT_NAME not in names:
-            print(f"[5/6] 失败：收到的投递不含 {ALERT_NAME}，实际={names}", file=sys.stderr)
+        content = wechat_content(payload)
+        if content is None:
+            print(
+                "[5/6] 失败：投递不符合企业微信群机器人负载约定"
+                "（payload 模板可能渲染成了非法 JSON）："
+                f"{json.dumps(payload, ensure_ascii=False)[:400]}",
+                file=sys.stderr,
+            )
+            return 1
+        if ALERT_NAME not in content:
+            print(f"[5/6] 失败：通知正文不含 {ALERT_NAME}：{content!r}", file=sys.stderr)
             return 1
         print(
-            f"[5/6] 已收到投递：status={payload.get('status')} "
-            f"alerts={names} receiver={payload.get('receiver')} 耗时={elapsed:.1f}s"
+            f"[5/6] 已收到投递：msgtype=markdown 耗时={elapsed:.1f}s\n"
+            f"      正文：{one_line(content)}"
         )
 
         if args.check_resolved:
@@ -231,8 +270,16 @@ def run_local(args) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            content2 = wechat_content(payload2)
+            if content2 is None or "已恢复" not in content2:
+                print(
+                    f"[6/6] 失败：恢复通知未按预期渲染（应含“已恢复”）：{content2!r}",
+                    file=sys.stderr,
+                )
+                return 1
             print(
-                f"[6/6] 已收到恢复通知：status={payload2.get('status')} 耗时={elapsed2:.1f}s"
+                f"[6/6] 已收到恢复通知 耗时={elapsed2:.1f}s\n"
+                f"      正文：{one_line(content2)}"
             )
         else:
             print("[6/6] 跳过恢复通知检查（加 --check-resolved 启用；受 group_interval 影响较慢）")

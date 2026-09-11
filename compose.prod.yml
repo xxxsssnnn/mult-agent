@@ -268,14 +268,17 @@ services:
     networks: [edge_net]
 
   alertmanager:
-    image: prom/alertmanager:v0.28.1
+    # v0.34.0：企业微信群机器人负载依赖 webhook_configs.payload（0.32.0 引入），
+    # 0.28.x 上会因 `field payload not found` 直接启动失败
+    image: prom/alertmanager:v0.34.0
     restart: unless-stopped
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      # 通知端点经文件注入（本目录已被 .gitignore 排除）；缺失会导致启动失败
+      # 企业微信群机器人 Webhook 经文件注入（本目录已被 .gitignore 排除）；
+      # 缺失会导致启动失败
       - ./monitoring/secrets:/etc/alertmanager/secrets:ro
       - alertmanager_data:/alertmanager
     ports:

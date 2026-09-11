@@ -43,7 +43,7 @@ frontend 通过 `depends_on: backend: condition: service_healthy` 等待后端�
 | 服务 | 镜像 | 作用 | 访问方式 |
 | --- | --- | --- | --- |
 | `prometheus` | `prom/prometheus:v2.55.1` | 抓取 `backend:8000/metrics`、评估告警规则 | `127.0.0.1:9090`（仅回环） |
-| `alertmanager` | `prom/alertmanager:v0.28.1` | 告警聚合、抑制与路由 | `127.0.0.1:9093`（仅回环） |
+| `alertmanager` | `prom/alertmanager:v0.34.0` | 告警聚合、抑制与路由 | `127.0.0.1:9093`（仅回环） |
 
 - 抓取与告警转发均走 `edge_net`；后端同时接入 `data_net` 与 `edge_net`，
   因此**无需**为监控放开数据网。
@@ -63,28 +63,38 @@ frontend 通过 `depends_on: backend: condition: service_healthy` 等待后端�
 
 ### 通知渠道与凭据注入
 
-`monitoring/alertmanager.yml` 的接收器 `ops-webhook` 是**真实投递**端点，
-其 URL **不写入仓库**，而是运行时从文件读取：
+告警投递到**企业微信群机器人**。机器人 Webhook **不写入仓库**，运行时从文件读取：
 
 | 项 | 值 |
 | --- | --- |
-| 宿主机文件 | `monitoring/secrets/webhook_url`（已被 `.gitignore` 排除） |
-| 容器内路径 | `/etc/alertmanager/secrets/webhook_url` |
+| 宿主机文件 | `monitoring/secrets/wechat_robot_url`（已被 `.gitignore` 排除） |
+| 容器内路径 | `/etc/alertmanager/secrets/wechat_robot_url` |
 | 配置字段 | `webhook_configs[].url_file` |
 
 创建步骤：
 
 ```bash
-cp monitoring/secrets/webhook_url.example monitoring/secrets/webhook_url
-vim monitoring/secrets/webhook_url        # 填入真实端点
+cp monitoring/secrets/wechat_robot_url.example monitoring/secrets/wechat_robot_url
+vim monitoring/secrets/wechat_robot_url       # 填入群机器人 Webhook 地址
 docker compose -f compose.prod.yml restart alertmanager
 ```
 
 **文件缺失会导致 alertmanager 启动失败**，这是刻意的 fail-fast ——
 静默丢告警比起不来危险得多。
 
-端点可填什么、以及"企业微信/钉钉群机器人不能直连"的原因，
-见 `monitoring/secrets/README.md`。
+群机器人只接受 `{"msgtype":"markdown","markdown":{"content":"..."}}`，
+与 Alertmanager 的默认负载格式不同。`monitoring/alertmanager.yml` 用
+`webhook_configs.payload` 的 Go 模板**直接渲染**成这个格式，**不需要中间适配器**
+（该字段 0.32.0 引入，编排因此锁 `v0.34.0`）。
+
+两个由此而来的约束：
+
+- `payload` 会**整体替换**默认负载（`version` / `status` / `alerts` 都不再发送），
+  所以该端点不再是通用 webhook，不能直接改指内部告警网关。
+- **模板渲染失败 = 告警发不出去**：被判为 unrecoverable error，会一直重试且永不成功。
+  `amtool check-config` 不渲染模板，查不出这一点，改完必须跑演练（见下节）。
+
+细节、群机器人限速与「自建应用」备选方案见 `monitoring/secrets/README.md`。
 
 > `compose.prod.yml` 的编排改动由 CI 的 `Validate production compose` 步骤校验
 > （`docker compose config`），语法或变量插值错误不会拖到部署时才暴露。

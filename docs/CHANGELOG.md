@@ -5,6 +5,90 @@
 
 ---
 
+## 2026-09-11 告警改投企业微信群机器人 + Alertmanager 升级至 0.34.0
+
+**提交**：本次提交（企业微信渠道）
+
+**改了什么**：
+
+- `monitoring/alertmanager.yml`：接收器从通用 `ops-webhook` 改为企业微信专用的
+  `ops-wechat`，用 `webhook_configs.payload` 的 Go 模板直接渲染群机器人负载。
+- `monitoring/secrets/`：凭据文件按新契约改名 `webhook_url` → `wechat_robot_url`，
+  示例文件与 README 同步重写。
+- `compose.prod.yml` / `ci.yml`：Alertmanager 镜像 `v0.28.1` → **`v0.34.0`**。
+- `monitoring/drill/alert_drill.py`：断言改为企业微信群机器人负载契约
+  （`msgtype=markdown`、`markdown` 必须是对象、正文含告警名/恢复字样），
+  并修掉 Windows GBK 控制台下 emoji 导致演练崩溃的问题。
+- `docs/OBSERVABILITY.md`、`monitoring/drill/README.md` 同步更新。
+
+**为什么改**：
+
+1. 上一轮把接收器接到了通用 webhook，但你们选定的渠道是企业微信。企业微信/钉钉的
+   群机器人只接受 `{"msgtype":...,"markdown":{"content":"..."}}`，与 Alertmanager
+   默认负载格式不同。
+2. 我上一轮在 `secrets/README.md` 里写过「群机器人必须加一层适配器」——
+   **这个结论是错的**。`webhook_configs.payload` 支持自定义负载，
+   Alertmanager 自己就能渲染出机器人格式，不需要额外服务。
+   也正因如此，避免了一个更糟的方案：把适配器放进**被监控的本服务**里，
+   那会造成「后端挂了 → 告警经后端转发 → 转发不出去」的循环依赖，
+   恰好丢掉最该收到的告警。
+
+**关键发现：编排锁定的 0.28.1 太旧，不升级就没有干净路径**
+
+最初直接用 `payload` 时实测报错：
+
+```text
+field payload not found in type config.plain
+```
+
+用官方二进制逐项实测后确认的能力差异：
+
+| 能力 | 0.28.1（原锁定） | 0.34.0（新锁定） |
+| --- | --- | --- |
+| `webhook_configs.payload` | 不支持 | 支持 |
+| `wechat_configs.api_secret_file` | 不支持 | 支持 |
+| `wechat_configs.api_url` | 未验证 | 支持 |
+
+`payload` 与 `url` 模板化是 **0.32.0（2026-04-08）** 引入的；0.28.1 是 2025-03 的版本。
+0.34.0 另外修掉了「payload 字符串值被误当作 YAML 重新解析」的缺陷（#5304）。
+
+也就是说，留在 0.28.1 只有两个选择：给群机器人配一层适配器服务，
+或者用原生自建应用把 `api_secret` 明文写进仓库配置。
+升级是唯一同时满足「无额外服务、无内联凭据、无组织标识入库」的路径。
+
+**设计取舍：为什么用群机器人而不是原生自建应用**
+
+原生 `wechat_configs` 能按部门/成员定向发送，但 `corp_id` / `agent_id` / `to_party`
+三个**部署标识**没有文件注入形式，只能写进配置文件。这是公开仓库，
+把组织标识提交进去不合适。群机器人只需要**一个 URL**，而 URL 恰好支持 `url_file`
+注入 —— 于是仓库里做到了零标识、零内联凭据。
+
+代价：群机器人限速 20 条/分钟，且不能指定接收人。已用
+`group_by` + `group_wait: 30s` / `group_interval: 5m` 聚合缓解；
+限制与备选方案写进了 `secrets/README.md`。
+
+**怎么验证的**：
+
+- `amtool check-config`（0.34.0）→ `SUCCESS`，并确认现有配置在 0.34.0 下没有不兼容项。
+- 演练实跑，用的是仓库里的 `alertmanager.yml`（唯一改动：`url_file` 一行）：
+  - 投递：`msgtype=markdown 耗时=30.0s`，正文
+    `**🔥 告警中** · DrillTestAlert | > 级别：critical ｜ 数量：1 | 告警链路演练 | [查看 Alertmanager](...)`
+  - 恢复：`耗时=300.2s`，正文切换为 `**✅ 已恢复** · DrillTestAlert`
+  - 30.0s / 300.2s 分别等于配置里的 `group_wait` 与 `group_interval`
+- 演练断言的是**企业微信群机器人负载契约**而非「有东西发出来」：
+  `msgtype=markdown`、`markdown` 必须是对象而非字符串。
+  模板渲染出非法 JSON 时 Alertmanager 会把该值退化成字符串，群机器人随后报参数错误 ——
+  `amtool` 查不出这类问题，只有真发一次才能暴露。
+
+**仍未验证（未声称已完成）**：
+
+- 企业微信群的**真实送达**：需要你们创建群机器人并写入
+  `monitoring/secrets/wechat_robot_url`，再跑一次 `alert_drill.py --mode remote`。
+- 容器内行为（本机无 Docker）：secrets 挂载，以及 0.34.0 读取 0.28.1 遗留
+  数据目录时的行为。若之前已在跑 0.28.1，静默规则（silences）可能需要重建。
+
+---
+
 ## 2026-09-11 告警接入真实投递渠道 + 端到端演练 + 官方工具校验
 
 **提交**：本次提交（告警渠道与演练）

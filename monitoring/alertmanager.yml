@@ -1,8 +1,17 @@
 # Alertmanager 配置：真实投递渠道 + 告警路由。
 #
-# 投递端点由文件注入，不写入仓库：
-#   monitoring/secrets/webhook_url  ->  容器内 /etc/alertmanager/secrets/webhook_url
-#   创建方式与可选端点见 monitoring/secrets/README.md
+# 投递渠道为**企业微信群机器人**。机器人 Webhook 不写入仓库：
+#   monitoring/secrets/wechat_robot_url  ->  容器内 /etc/alertmanager/secrets/wechat_robot_url
+#   创建方式与限制见 monitoring/secrets/README.md
+#
+# 用 webhook_configs + 自定义 payload 直接生成群机器人要求的
+#   {"msgtype":"markdown","markdown":{"content":"..."}}
+# 因此**不需要**中间适配器服务（详见 secrets/README.md 的版本要求）。
+#
+# 改动 payload 时请注意：payload 会**整体替换** Alertmanager 的默认负载，
+# 且模板渲染失败会被判定为 unrecoverable error —— 重试也不会成功，
+# 表现为告警一直发不出去。所以改完必须跑一次演练：
+#   python monitoring/drill/alert_drill.py --mode local --alertmanager-bin <path>
 #
 # 本文件改动后需重启才生效：
 #   docker compose -f compose.prod.yml restart alertmanager
@@ -11,7 +20,7 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: ops-webhook
+  receiver: ops-wechat
   group_by: ["alertname", "severity"]
   group_wait: 30s
   group_interval: 5m
@@ -20,18 +29,26 @@ route:
     # 严重告警提高重发频率，缩短发现到响应的时间
     - matchers:
         - 'severity="critical"'
-      receiver: ops-webhook
+      receiver: ops-wechat
       repeat_interval: 1h
 
 receivers:
-  - name: ops-webhook
+  - name: ops-wechat
     webhook_configs:
       # url 与 url_file 互斥；这里用 url_file 注入，避免投放端点进入仓库。
       # 文件缺失会导致 alertmanager 启动失败（刻意 fail-fast，见 secrets/README.md）。
-      - url_file: /etc/alertmanager/secrets/webhook_url
+      - url_file: /etc/alertmanager/secrets/wechat_robot_url
         # 恢复也要通知，否则只能靠人盯看板确认已恢复
         send_resolved: true
+        # 0 = 不截断，模板里拿得到全部告警
         max_alerts: 0
+        # payload 的值是 Go 模板，渲染结果若是合法 JSON 会被嵌入为**对象**；
+        # 不是合法 JSON 则退化为字符串（群机器人会报参数错误），因此这里用
+        # toJson 转义正文，避免告警文本里的引号/换行把 JSON 弄坏。
+        # 正文用 %s/%d 占位，\n 由 Go 字符串字面量解释，再由 toJson 转义成 JSON 的 \n。
+        payload:
+          msgtype: markdown
+          markdown: '{{ $head := "**🔥 告警中**" }}{{ if eq .Status "resolved" }}{{ $head = "**✅ 已恢复**" }}{{ end }}{{ $body := printf "%s · %s\n> 级别：%s ｜ 数量：%d\n\n%s\n\n[查看 Alertmanager](%s)" $head .CommonLabels.alertname .CommonLabels.severity (len .Alerts) .CommonAnnotations.summary .ExternalURL }}{"content": {{ $body | toJson }}}'
 
 inhibit_rules:
   # 抓取目标整体不可达时，抑制由其派生的依赖/性能告警，避免告警风暴

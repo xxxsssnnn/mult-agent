@@ -170,7 +170,7 @@ jobs:
         run: |
           docker run --rm --entrypoint /bin/amtool \
             -v "$PWD/monitoring:/etc/alertmanager:ro" \
-            prom/alertmanager:v0.28.1 \
+            prom/alertmanager:v0.34.0 \
             check-config /etc/alertmanager/alertmanager.yml
 
           docker run --rm --entrypoint /bin/promtool \

@@ -1,0 +1,37 @@
+# Alertmanager 配置（默认仅聚合与抑制，不实际投递通知）。
+#
+# 接入真实通知渠道的步骤：
+#   1) 在 receivers 中新增渠道（webhook / email / 企业微信 / 钉钉 等）；
+#   2) 把 route.receiver 指向该渠道名；
+#   3) docker compose -f compose.prod.yml restart alertmanager
+#
+# 注意：本文件以只读方式挂载进容器，改动后必须重启 alertmanager 才生效。
+
+global:
+  resolve_timeout: 5m
+
+route:
+  # 默认接收器为 no-op：未配置渠道时只做聚合，避免把告警误发到未知去处
+  receiver: default
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # 严重告警提高重发频率，缩短发现到响应的时间
+    - matchers:
+        - 'severity="critical"'
+      receiver: default
+      repeat_interval: 1h
+
+receivers:
+  # no-op 接收器：接入真实渠道后请替换为实际配置
+  - name: default
+
+inhibit_rules:
+  # 抓取目标整体不可达时，抑制由其派生的依赖/性能告警，避免告警风暴
+  - source_matchers:
+      - 'alertname="BackendTargetDown"'
+    target_matchers:
+      - 'alertname=~"BackendDatabaseUnavailable|BackendRedisUnavailable|BackendHighErrorRate|BackendHighLatencyP95"'
+    equal: []

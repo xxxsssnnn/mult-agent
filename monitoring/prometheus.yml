@@ -1,9 +1,8 @@
-# Prometheus 抓取配置样例（多智能体平台）。
+# Prometheus 抓取配置（多智能体平台生产环境）。
 #
-# 用法：
-#   1) 在 compose.prod.yml 的网络内新增 prometheus 服务并挂载本目录；
-#   2) 使 prometheus 同时接入 edge_net（可达 backend:8000）。
-# 说明：backend 的 /metrics 默认开启（METRICS_ENABLED=false 可关闭）。
+# 由 compose.prod.yml 的 prometheus 服务以只读方式挂载到 /etc/prometheus/prometheus.yml。
+# 抓取目标 backend:8000 走 edge_net（backend 同时接入 data_net 与 edge_net）。
+# 告警规则见同目录 alerts.yml，告警路由见 alertmanager.yml。
 
 global:
   scrape_interval: 15s
@@ -11,6 +10,11 @@ global:
 
 rule_files:
   - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: multi-agent-backend

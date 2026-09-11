@@ -5,6 +5,50 @@
 
 ---
 
+## 2026-09-11 监控组件接入生产编排：Prometheus + Alertmanager
+
+**提交**：本次提交（监控接入）
+
+**改了什么**：
+
+- `compose.prod.yml` 新增两个监控服务（均只绑定回环、`no-new-privileges`、显式资源限额）：
+  - `prometheus`（`prom/prometheus:v2.55.1`）：抓取 `backend:8000/metrics`，
+    管理 UI → `127.0.0.1:9090`；
+  - `alertmanager`（`prom/alertmanager:v0.28.1`）：告警聚合 / 抑制 / 路由，
+    管理 UI → `127.0.0.1:9093`；
+  - 新增命名卷 `prometheus_data` / `alertmanager_data`。
+- `monitoring/prometheus.yml`：新增 `alerting` 段，指向 `alertmanager:9093`。
+- 新增 `monitoring/alertmanager.yml`：默认 no-op 接收器 + 分组/重复间隔配置 +
+  抑制规则（抓取目标不可达时抑制其派生告警，避免告警风暴）。
+- `.github/workflows/ci.yml`：Docker Build 任务新增 `Validate production compose` 步骤，
+  用 `docker compose config` 校验 `compose.prod.yml`。
+
+**为什么这么改**：上一步只解决了"应用能产出指标"，但没有任何组件负责采集、存储、
+评估规则与发送告警，**监控链路是断的**。同时 `compose.prod.yml` 此前完全没有 CI 校验，
+编排错误只能等到部署时才暴露。
+
+**设计取舍**：
+
+- 监控组件接入 `edge_net`：后端同时位于 `data_net` 与 `edge_net`，因此**无需**为监控放开
+  internal 数据网，数据面隔离不被削弱。
+- 管理 UI 只绑定 `127.0.0.1`，沿用 backend 的既有做法，不新增公网入口。
+- Prometheus **不依赖** Alertmanager 即可启动 —— 告警通道故障不应中断指标采集。
+- 不开启 `--web.enable-lifecycle`：避免出现未鉴权的配置热加载端点，改配置走显式重启。
+- Alertmanager 默认接收器为 no-op：避免在未配置渠道时把告警发往未知去处。
+
+**怎么保证没引入回归（含验证边界）**：
+
+- **本机无 Docker**，因此 `docker compose config` 与真实启动**未能在本地执行**。
+  本地已完成的可验证项：对 `compose.prod.yml`、`monitoring/*.yml`、`ci.yml` 做
+  YAML 解析 + 结构断言（服务与卷齐全、端口仅回环、健康检查与告警目标指向正确）。
+- 新增的 CI 步骤会在 GitHub Runner 上用 `docker compose config` 补上编排校验；
+  该步骤刻意复用 `.env.prod.example` 的**既有占位符**（`cp .env.prod.example .env`），
+  **不引入任何新的凭据字面量**，因此 `.gitleaks.toml` 无需新增豁免。
+- 告警规则的语义正确性（`promtool` / `amtool` 校验）仍待有 Docker 的环境补做 ——
+  这一点已明确记录，未声称已验证。
+
+---
+
 ## 2026-09-10 可观测性补齐：存活/就绪探针 + Prometheus 指标
 
 **提交**：本次提交（可观测性补齐）

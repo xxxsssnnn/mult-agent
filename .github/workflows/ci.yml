@@ -153,6 +153,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 生产编排不在镜像构建范围内，单独做 schema + 变量插值校验，
+      # 避免 compose.prod.yml 的问题拖到部署时才暴露。
+      # 变量值直接复用 .env.prod.example 的占位符，不引入任何新的凭据字面量（gitleaks 无需新增豁免）。
+      - name: Validate production compose
+        run: |
+          cp .env.prod.example .env.prod
+          cp .env.prod.example .env
+          docker compose -f compose.prod.yml config --quiet
+          echo "compose.prod.yml 校验通过"
+
       - name: Build backend image
         run: docker build -t multi-agent-backend:ci ./backend
 

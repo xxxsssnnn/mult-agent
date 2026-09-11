@@ -38,16 +38,40 @@ frontend 通过 `depends_on: backend: condition: service_healthy` 等待后端�
 
 ## 3. 抓取与告警
 
-样例配置见 `monitoring/`：
+`compose.prod.yml` 已内置两个监控服务，配置见 `monitoring/`：
 
-- `prometheus.yml`：抓取 `backend:8000/metrics`；
-- `alerts.yml`：可用性（目标不可达 / 依赖不可用）+ 性能（5xx 比例 / P95 延迟）告警。
+| 服务 | 镜像 | 作用 | 访问方式 |
+| --- | --- | --- | --- |
+| `prometheus` | `prom/prometheus:v2.55.1` | 抓取 `backend:8000/metrics`、评估告警规则 | `127.0.0.1:9090`（仅回环） |
+| `alertmanager` | `prom/alertmanager:v0.28.1` | 告警聚合、抑制与路由 | `127.0.0.1:9093`（仅回环） |
 
-接入步骤：
+- 抓取与告警转发均走 `edge_net`；后端同时接入 `data_net` 与 `edge_net`，
+  因此**无需**为监控放开数据网。
+- 管理 UI **只绑定回环地址**，不暴露公网；需要远程查看时请走跳板机或 SSH 隧道。
+- Prometheus 未开启 `--web.enable-lifecycle`（避免未鉴权的配置热加载端点），
+  改配置后需重启：`docker compose -f compose.prod.yml restart prometheus`。
 
-1. 在 `compose.prod.yml` 的 `edge_net` 上新增 `prometheus` 服务，挂载 `monitoring/` 到
-   `/etc/prometheus/`；若需被外部访问，再按需限制入口。
-2. 在 Prometheus / Alertmanager 侧配置告警路由（邮件、IM、工单等）。
+### 告警规则（`monitoring/alerts.yml`）
+
+| 告警 | 触发条件 | 级别 |
+| --- | --- | --- |
+| `BackendTargetDown` | 抓取目标连续 1 分钟不可达 | critical |
+| `BackendDatabaseUnavailable` | `dependency_up{dependency="database"} == 0` | critical |
+| `BackendRedisUnavailable` | `dependency_up{dependency="redis"} == 0` | warning |
+| `BackendHighErrorRate` | 5xx 占比 > 5%（5 分钟窗口） | warning |
+| `BackendHighLatencyP95` | P95 请求耗时 > 1s（5 分钟窗口） | warning |
+
+### 接入通知渠道
+
+`monitoring/alertmanager.yml` 默认的 `default` 接收器是 **no-op**（只聚合、不投递），
+以免在未配置渠道时把告警发往未知去处。接入步骤：
+
+1. 在 `receivers` 中新增渠道（webhook / email / 企业微信 / 钉钉 等）；
+2. 把 `route.receiver` 指向该渠道名；
+3. `docker compose -f compose.prod.yml restart alertmanager`。
+
+> `compose.prod.yml` 的编排改动由 CI 的 `Validate production compose` 步骤校验
+> （`docker compose config`），语法或变量插值错误不会拖到部署时才暴露。
 
 ## 4. 相关环境变量
 

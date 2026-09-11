@@ -1,18 +1,17 @@
-# Alertmanager 配置（默认仅聚合与抑制，不实际投递通知）。
+# Alertmanager 配置：真实投递渠道 + 告警路由。
 #
-# 接入真实通知渠道的步骤：
-#   1) 在 receivers 中新增渠道（webhook / email / 企业微信 / 钉钉 等）；
-#   2) 把 route.receiver 指向该渠道名；
-#   3) docker compose -f compose.prod.yml restart alertmanager
+# 投递端点由文件注入，不写入仓库：
+#   monitoring/secrets/webhook_url  ->  容器内 /etc/alertmanager/secrets/webhook_url
+#   创建方式与可选端点见 monitoring/secrets/README.md
 #
-# 注意：本文件以只读方式挂载进容器，改动后必须重启 alertmanager 才生效。
+# 本文件改动后需重启才生效：
+#   docker compose -f compose.prod.yml restart alertmanager
 
 global:
   resolve_timeout: 5m
 
 route:
-  # 默认接收器为 no-op：未配置渠道时只做聚合，避免把告警误发到未知去处
-  receiver: default
+  receiver: ops-webhook
   group_by: ["alertname", "severity"]
   group_wait: 30s
   group_interval: 5m
@@ -21,12 +20,18 @@ route:
     # 严重告警提高重发频率，缩短发现到响应的时间
     - matchers:
         - 'severity="critical"'
-      receiver: default
+      receiver: ops-webhook
       repeat_interval: 1h
 
 receivers:
-  # no-op 接收器：接入真实渠道后请替换为实际配置
-  - name: default
+  - name: ops-webhook
+    webhook_configs:
+      # url 与 url_file 互斥；这里用 url_file 注入，避免投放端点进入仓库。
+      # 文件缺失会导致 alertmanager 启动失败（刻意 fail-fast，见 secrets/README.md）。
+      - url_file: /etc/alertmanager/secrets/webhook_url
+        # 恢复也要通知，否则只能靠人盯看板确认已恢复
+        send_resolved: true
+        max_alerts: 0
 
 inhibit_rules:
   # 抓取目标整体不可达时，抑制由其派生的依赖/性能告警，避免告警风暴

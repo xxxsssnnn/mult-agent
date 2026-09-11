@@ -275,6 +275,8 @@ services:
       - --storage.path=/alertmanager
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # 通知端点经文件注入（本目录已被 .gitignore 排除）；缺失会导致启动失败
+      - ./monitoring/secrets:/etc/alertmanager/secrets:ro
       - alertmanager_data:/alertmanager
     ports:
       - "127.0.0.1:9093:9093"

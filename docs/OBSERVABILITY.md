@@ -61,17 +61,49 @@ frontend 通过 `depends_on: backend: condition: service_healthy` 等待后端�
 | `BackendHighErrorRate` | 5xx 占比 > 5%（5 分钟窗口） | warning |
 | `BackendHighLatencyP95` | P95 请求耗时 > 1s（5 分钟窗口） | warning |
 
-### 接入通知渠道
+### 通知渠道与凭据注入
 
-`monitoring/alertmanager.yml` 默认的 `default` 接收器是 **no-op**（只聚合、不投递），
-以免在未配置渠道时把告警发往未知去处。接入步骤：
+`monitoring/alertmanager.yml` 的接收器 `ops-webhook` 是**真实投递**端点，
+其 URL **不写入仓库**，而是运行时从文件读取：
 
-1. 在 `receivers` 中新增渠道（webhook / email / 企业微信 / 钉钉 等）；
-2. 把 `route.receiver` 指向该渠道名；
-3. `docker compose -f compose.prod.yml restart alertmanager`。
+| 项 | 值 |
+| --- | --- |
+| 宿主机文件 | `monitoring/secrets/webhook_url`（已被 `.gitignore` 排除） |
+| 容器内路径 | `/etc/alertmanager/secrets/webhook_url` |
+| 配置字段 | `webhook_configs[].url_file` |
+
+创建步骤：
+
+```bash
+cp monitoring/secrets/webhook_url.example monitoring/secrets/webhook_url
+vim monitoring/secrets/webhook_url        # 填入真实端点
+docker compose -f compose.prod.yml restart alertmanager
+```
+
+**文件缺失会导致 alertmanager 启动失败**，这是刻意的 fail-fast ——
+静默丢告警比起不来危险得多。
+
+端点可填什么、以及"企业微信/钉钉群机器人不能直连"的原因，
+见 `monitoring/secrets/README.md`。
 
 > `compose.prod.yml` 的编排改动由 CI 的 `Validate production compose` 步骤校验
 > （`docker compose config`），语法或变量插值错误不会拖到部署时才暴露。
+
+### 告警演练
+
+配置校验只能证明 YAML 合法，**不能证明告警发得出去**。
+`monitoring/drill/alert_drill.py` 负责端到端演练：
+
+```bash
+# 本机全链路：本地接收器 + 用仓库配置启动 alertmanager + 断言投递到达
+python monitoring/drill/alert_drill.py --mode local --alertmanager-bin /path/to/alertmanager
+
+# 对已运行实例（生产容器）投递真实告警，验证真实渠道送达
+python monitoring/drill/alert_drill.py --mode remote --alertmanager-url http://127.0.0.1:9093
+python monitoring/drill/alert_drill.py --mode remote --resolve   # 再验恢复通知
+```
+
+产出与注意事项见 `monitoring/drill/README.md`。
 
 ## 4. 相关环境变量
 

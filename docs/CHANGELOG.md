@@ -5,6 +5,62 @@
 
 ---
 
+## 2026-09-11 告警接入真实投递渠道 + 端到端演练 + 官方工具校验
+
+**提交**：本次提交（告警渠道与演练）
+
+**改了什么**：
+
+- `monitoring/alertmanager.yml`：把 no-op `default` 接收器换成**真实投递**的
+  `ops-webhook`；端点经 `url_file` 从文件注入；`send_resolved: true` 支持恢复通知。
+- 新增 `monitoring/secrets/`：`webhook_url`（运行时凭据，已 gitignore）、
+  `webhook_url.example`、`README.md`（端点类型说明与 fail-fast 原因）。
+- `compose.prod.yml`：alertmanager 增加挂载
+  `./monitoring/secrets:/etc/alertmanager/secrets:ro`。
+- 新增 `monitoring/drill/alert_drill.py` + `README.md`：端到端告警投递演练
+  （`--mode local` 本机全链路 / `--mode remote` 对生产实例投递）。
+- `.gitignore`：排除 `monitoring/secrets/*`（保留 README 与 example）与演练临时目录。
+- `docs/OBSERVABILITY.md`：重写通知渠道与演练章节。
+
+**为什么这么改**：P0 问题"告警还不会真正通知人"——此前接收器是 no-op，
+告警链路在**最后一跳断掉**。另外我上一轮明确记下"`promtool` / `amtool` 校验未做"，
+规则里的 PromQL 到底能不能触发一直缺证据。
+
+**设计取舍：为什么用 webhook 而不是原生企业微信**
+
+- 企业微信原生 `wechat_configs` 需要 `corp_id` + `agent_id` + `to_party` + `api_secret`
+  四个**部署相关**取值；其中只有 `api_secret` 支持 `api_secret_file` 文件注入，
+  其余三个必须写进配置文件。这是公开仓库，把组织标识提交进去不合适。
+- `webhook_configs` 只需要**一个** URL，且支持 `url_file`，
+  于是仓库里可以做到**零部署标识、零凭据**。
+- 代价：企业微信/钉钉**群机器人**只接受 `{"msgtype":"text","text":{"content":...}}`，
+  与 Alertmanager 的负载格式不同，中间需要一层适配器
+  （如 `prometheus-webhook-dingtalk`）。这一点已写进 `secrets/README.md`，
+  避免有人把群机器人地址直接填进去、然后以为告警通了。
+
+**怎么验证的（这次是真跑过，不再是"待补做"）**：
+
+- 用与编排**锁定版本一致**的官方二进制在本机实跑：
+  - `promtool check rules monitoring/alerts.yml` → `SUCCESS: 5 rules found`
+  - `promtool check config`（`prometheus.yml`，仅把 `rule_files` 改成本地路径）→
+    `SUCCESS: 1 rule files found`、`is valid prometheus config file syntax`
+  - `amtool check-config monitoring/alertmanager.yml` → `SUCCESS`（1 receiver、1 inhibit rule）
+- `alert_drill.py --mode local` 实跑通过，**用的就是仓库里的 `alertmanager.yml`**
+  （唯一改动：`url_file` 指向本机临时 secrets 目录）：
+  - 投递告警：`status=firing alerts=['DrillTestAlert'] receiver=ops-webhook 耗时=30.0s`
+  - 恢复通知：`status=resolved 耗时=300.2s`
+  - 30.0s 与 300.2s 分别精确等于配置里的 `group_wait: 30s` 和
+    `group_interval: 5m`，说明生效的是真实配置而非测试替身。
+
+**仍未验证（未声称已完成）**：
+
+- 真实企业微信/钉钉/邮件端点的**最终送达**，需要你们的凭据与端点。
+  `--mode remote` 就是为此准备的，届时在接收端确认即可。
+- 容器内的运行行为（本机无 Docker）：`webhook_url` 挂载、alertmanager 启动时机、
+  与 Prometheus 的联动，都还没实机跑过。
+
+---
+
 ## 2026-09-11 监控组件接入生产编排：Prometheus + Alertmanager
 
 **提交**：本次提交（监控接入）

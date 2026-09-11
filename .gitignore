@@ -55,6 +55,14 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Alertmanager 通知凭据（只保留说明与示例，真实值不入库）
+monitoring/secrets/*
+!monitoring/secrets/README.md
+!monitoring/secrets/webhook_url.example
+
+# 告警演练产生的临时文件
+monitoring/drill/_work/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/

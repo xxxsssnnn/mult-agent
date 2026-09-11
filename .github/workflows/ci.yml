@@ -163,6 +163,28 @@ jobs:
           docker compose -f compose.prod.yml config --quiet
           echo "compose.prod.yml 校验通过"
 
+      # 告警/抓取配置写错会让告警静默失效，而本机通常没有 Docker 可先验。
+      # 用与编排锁定版本一致的官方镜像校验；amtool check-config 不读取
+      # url_file 指向的文件，所以 CI 无需提供真实凭据。
+      - name: Validate monitoring config
+        run: |
+          docker run --rm --entrypoint /bin/amtool \
+            -v "$PWD/monitoring:/etc/alertmanager:ro" \
+            prom/alertmanager:v0.28.1 \
+            check-config /etc/alertmanager/alertmanager.yml
+
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD/monitoring:/etc/prometheus:ro" \
+            prom/prometheus:v2.55.1 \
+            check config /etc/prometheus/prometheus.yml
+
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD/monitoring:/etc/prometheus:ro" \
+            prom/prometheus:v2.55.1 \
+            check rules /etc/prometheus/alerts.yml
+
+          echo "monitoring 配置校验通过"
+
       - name: Build backend image
         run: docker build -t multi-agent-backend:ci ./backend
 

@@ -5,6 +5,49 @@
 
 ---
 
+## 2026-09-10 可观测性补齐：存活/就绪探针 + Prometheus 指标
+
+**提交**：本次提交（可观测性补齐）
+
+**改了什么**：
+
+- 新增 `backend/app/core/observability.py`：
+  - `PrometheusMiddleware`（纯 ASGI 中间件）：采集 `http_requests_total`、
+    `http_request_duration_seconds`、`http_requests_in_flight`；
+  - `collect_readiness()`：探测数据库（`SELECT 1`）与 Redis（`PING`）连通性，
+    导出 `dependency_up{dependency=...}` gauge；
+  - `path` 标签取**路由模板**（如 `/api/v1/tasks/{task_id}`），未匹配路由归一为
+    `unmatched`，避免 UUID 类路径把标签基数打爆。
+- `app/main.py`：新增三个端点
+  - `/health/live` 存活探针（不检查外部依赖）；
+  - `/health/ready` 就绪探针（关键依赖不可用返回 **503**）；
+  - `/metrics` Prometheus 出口（`METRICS_ENABLED=false` 时返回 404）。
+- `app/core/config.py`：新增 `METRICS_ENABLED`（默认开启）。
+- `compose.prod.yml`：backend 增加基于 `/health/ready` 的 `healthcheck`；
+  frontend 的 `depends_on` 改为 `condition: service_healthy`（后端未就绪不启动前端）。
+- 依赖：新增 `prometheus-client==0.23.1`（纯 Python，无传递依赖），
+  已同步 `requirements.txt` 与 `requirements.lock`。
+- 新增 `monitoring/`（Prometheus 抓取配置 + 告警规则样例）与 `docs/OBSERVABILITY.md`。
+
+**为什么这么改**：评估报告指出"运维/可观测性不足"——此前只有静态 `/health`，
+缺少存活/就绪区分与运行指标，编排无法据此摘流或重启，也无从观测延迟与错误率。
+
+**设计取舍**：
+
+- 就绪探针**分级判定**：数据库始终为关键依赖；Redis **仅**在
+  `MEMORY_SHORT_TERM_STORE=redis` 时视为关键——因为 `auto` 模式下 Redis 不可用会
+  降级为内存存储，若把它一律算作关键会导致误摘流。
+- 存活探针**不检查外部依赖**，避免依赖抖动触发容器被反复重启。
+
+**怎么保证没引入回归**：
+
+- `pip check` 无破损依赖；`bandit -r backend/app -ll` → `No issues identified`。
+- 按 CI 的方式展开基线豁免跑 `pip-audit` → `No known vulnerabilities found, 37 ignored`，
+  退出码 0（基线条目仍为 37，新增依赖未带来漏洞）。
+- 完整门禁 **27/27 通过（156.1s）**；pytest 套件 14 项全过（含新增 6 项可观测性用例）。
+
+---
+
 ## 2026-09-10 依赖基线开始收缩：低风险组 12 项清零（49 → 37）
 
 **提交**：本次提交（低风险依赖升级）

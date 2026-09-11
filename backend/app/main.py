@@ -1,6 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from app.core.observability import (
+    METRICS_CONTENT_TYPE,
+    PrometheusMiddleware,
+    collect_readiness,
+    render_metrics,
+)
 from app.api import auth, agents, tasks, workflows, memory, rag
 import structlog
 
@@ -34,6 +40,9 @@ app = FastAPI(
     redoc_url=None if settings.is_production else "/redoc",
     openapi_url=None if settings.is_production else "/openapi.json",
 )
+
+# 可观测性中间件（先注册，使 CORS 处于更外层，优先处理跨域预检）
+app.add_middleware(PrometheusMiddleware)
 
 # 配置CORS
 app.add_middleware(
@@ -70,6 +79,33 @@ async def health_check():
         "status": "healthy",
         "service": settings.APP_NAME
     }
+
+
+@app.get("/health/live")
+async def liveness_probe():
+    """存活探针：进程可响应即存活，不检查外部依赖（避免依赖抖动引发误重启）。"""
+    return {"status": "alive", "service": settings.APP_NAME}
+
+
+@app.get("/health/ready")
+async def readiness_probe(response: Response):
+    """就绪探针：关键依赖不可用时返回 503，供编排 / 负载均衡摘流。"""
+    result = await collect_readiness()
+    if result["ready"]:
+        result["status"] = "ready"
+    else:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        result["status"] = "not_ready"
+    result["service"] = settings.APP_NAME
+    return result
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus 指标出口（可通过 METRICS_ENABLED 关闭）。"""
+    if not settings.METRICS_ENABLED:
+        raise HTTPException(status_code=404, detail="metrics disabled")
+    return Response(content=render_metrics(), media_type=METRICS_CONTENT_TYPE)
 
 
 @app.on_event("startup")

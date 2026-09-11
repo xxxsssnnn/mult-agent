@@ -52,6 +52,9 @@ structlog==23.2.0
 httpx==0.28.1
 email-validator==2.1.0
 
+# Observability（/metrics 暴露 Prometheus 指标；纯 Python 实现，无传递依赖）
+prometheus-client==0.23.1
+
 # 可选 / 暂未启用（当前代码未引用；如需启用，需同步更新 requirements.lock 并重跑门禁）
 # faiss-cpu>=1.7.4,<2.0
 # pypdf>=3.17.0,<4.0

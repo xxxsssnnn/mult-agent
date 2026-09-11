@@ -1,0 +1,64 @@
+# 告警规则样例（基于 backend 暴露的 Prometheus 指标）。
+#
+# 对应指标来源：backend/app/core/observability.py
+#   - up                                         抓取目标存活
+#   - dependency_up{dependency="database|redis"}  依赖可用性（1/0）
+#   - http_requests_total{method,path,status}     请求计数
+#   - http_request_duration_seconds_bucket        请求耗时直方图
+
+groups:
+  - name: multi-agent-availability
+    rules:
+      - alert: BackendTargetDown
+        expr: up{job="multi-agent-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端抓取目标不可达"
+          description: "Prometheus 已连续 1 分钟抓不到 backend:8000/metrics。"
+
+      - alert: BackendDatabaseUnavailable
+        expr: dependency_up{dependency="database"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端数据库依赖不可用"
+          description: "就绪探针检测到数据库连通性失败，实例可能已被摘流。"
+
+      - alert: BackendRedisUnavailable
+        expr: dependency_up{dependency="redis"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "后端 Redis 依赖不可用"
+          description: "Redis 不可达（auto 模式下短期记忆已降级为内存，容量与多实例共享受影响）。"
+
+  - name: multi-agent-performance
+    rules:
+      - alert: BackendHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "后端 5xx 比例过高"
+          description: "近 5 分钟 5xx 占比超过 5%。"
+
+      - alert: BackendHighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "后端 P95 延迟过高"
+          description: "近 5 分钟 P95 请求耗时超过 1s。"

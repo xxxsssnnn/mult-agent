@@ -1,0 +1,19 @@
+# Prometheus 抓取配置样例（多智能体平台）。
+#
+# 用法：
+#   1) 在 compose.prod.yml 的网络内新增 prometheus 服务并挂载本目录；
+#   2) 使 prometheus 同时接入 edge_net（可达 backend:8000）。
+# 说明：backend 的 /metrics 默认开启（METRICS_ENABLED=false 可关闭）。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: multi-agent-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]

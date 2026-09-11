@@ -13,6 +13,10 @@ class Settings:
     DEBUG: bool = os.getenv("DEBUG", "False").lower() == "true"
     API_V1_PREFIX: str = os.getenv("API_V1_PREFIX", "/api/v1")
 
+    # --- 可观测性 ---
+    # 是否暴露 Prometheus 指标端点（/metrics）；关闭后该端点返回 404
+    METRICS_ENABLED: bool = os.getenv("METRICS_ENABLED", "True").lower() == "true"
+
     # 默认不含固定数据库口令；需要口令时请在环境变量中显式提供强口令
     DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres@localhost:5432/multi_agent")
     DATABASE_ECHO: bool = os.getenv("DATABASE_ECHO", "False").lower() == "true"
